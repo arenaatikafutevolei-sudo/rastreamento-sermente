@@ -1,5 +1,9 @@
 /**
- * Servidor de Rastreamento Sermente (OTIMIZADO PARA RAILWAY)
+ * Servidor de Rastreamento Sermente
+ * Backend para consultar rastreamento de pedidos via SPX Express
+ * 
+ * Autor: Sermente E-commerce
+ * Data: 2026
  */
 
 const express = require('express');
@@ -14,192 +18,212 @@ const PORT = process.env.PORT || 3001;
 app.use(cors());
 app.use(express.json());
 
-// Health check
+// Rota de health check
 app.get('/health', (req, res) => {
-  res.json({ status: 'OK', message: 'Servidor ativo 🚀' });
+  res.json({ status: 'OK', message: 'Servidor de rastreamento ativo' });
 });
 
-// Endpoint principal
+/**
+ * Endpoint para rastrear pedidos na SPX Express
+ * GET /rastreio/:codigo
+ * 
+ * Parâmetros:
+ * - codigo: Código de rastreio do pedido
+ * 
+ * Retorna:
+ * {
+ *   "status": "Em transporte",
+ *   "eventos": [
+ *     { 
+ *       "descricao": "Pedido em rota de entrega para seu endereço",
+ *       "data": "18 Mar 2026", 
+ *       "hora": "16:21:05",
+ *       "local": "São Bernardo do Campo - SP"
+ *     }
+ *   ]
+ * }
+ */
 app.get('/rastreio/:codigo', async (req, res) => {
   const { codigo } = req.params;
 
+  // Validação básica do código de rastreio
   if (!codigo || codigo.trim().length === 0) {
     return res.status(400).json({
       erro: true,
-      mensagem: 'Código inválido'
+      mensagem: 'Código de rastreio inválido'
     });
   }
 
   let browser;
 
   try {
-    console.log(`🔍 Rastreando: ${codigo}`);
-
-    // 🚀 CONFIGURAÇÃO OTIMIZADA PRO RAILWAY
+    // Inicializar Puppeteer com opções de sandbox desabilitadas
     browser = await puppeteer.launch({
       headless: 'new',
-      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--single-process'
+        '--disable-gpu'
       ]
     });
 
+    // Criar nova página
     const page = await browser.newPage();
 
-    await page.setUserAgent(
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-    );
-
+    // Definir timeout para a página
     page.setDefaultTimeout(30000);
     page.setDefaultNavigationTimeout(30000);
+    
+    // Configurar user agent para evitar bloqueios
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
 
+    // URL da SPX Express com o código de rastreio
     const url = `https://spx.com.br/track?${encodeURIComponent(codigo)}`;
 
-    // 🚀 CARREGAMENTO ESTÁVEL
-    await page.goto(url, {
-      waitUntil: 'domcontentloaded',
+    console.log(`[${new Date().toISOString()}] Rastreando: ${codigo}`);
+    console.log(`URL: ${url}`);
+
+    // Acessar a página
+    await page.goto(url, { 
+      waitUntil: 'networkidle2',
       timeout: 30000
+    }).catch(err => {
+      console.log('Erro ao navegar:', err.message);
     });
 
-    // 🚀 ESPERA INTELIGENTE
-    await page.waitForFunction(() => {
-      return document.body && document.body.innerText.length > 100;
-    }, { timeout: 10000 }).catch(() => null);
+    // Aguardar um pouco para a página carregar completamente
+    await page.waitForTimeout(2000);
 
-    await page.waitForTimeout(5000);
-
-    // 🚀 CAPTURA CONTROLADA (EVITA TRAVAMENTO)
-    const responsesCapturados = [];
-
-    page.on('response', async (response) => {
-      try {
-        const url = response.url();
-        const status = response.status();
-
-        if (
-          (url.includes('track') || url.includes('tracking') || url.includes('rastr')) &&
-          status === 200
-        ) {
-          const contentType = response.headers()['content-type'] || '';
-
-          if (contentType.includes('application/json')) {
-            const data = await response.json().catch(() => null);
-            if (data) {
-              responsesCapturados.push({ url, data });
-            }
-          }
-        }
-      } catch {}
-    });
-
-    // 🚀 SCRAPING PRINCIPAL
+    // Extrair dados da página
     const dados = await page.evaluate(() => {
       const resultado = {
         status: 'Informação não disponível',
         eventos: []
       };
 
-      const text = document.body.innerText;
-
-      if (text.includes('não gerou resultados') || text.includes('não encontrado')) {
-        resultado.status = 'Código não encontrado';
+      // Obter todo o texto da página
+      const pageText = document.body.innerText;
+      
+      // Verificar se houve erro
+      if (pageText.includes('não gerou resultados') || pageText.includes('não encontrado')) {
+        resultado.status = 'Código de rastreio não encontrado';
         return resultado;
       }
 
-      // STATUS
-      const match = text.match(/Status[:\s]+(.*?)(?:\n|$)/i);
-      if (match) resultado.status = match[1].trim();
+      // ============================================
+      // EXTRAIR STATUS ATUAL
+      // ============================================
+      
+      // Procurar por status na página
+      const statusPatterns = [
+        'Em trânsito',
+        'Saiu para entrega',
+        'Entregue',
+        'Pendente Envio',
+        'Processando'
+      ];
 
-      // EVENTOS POR DATA
-      const datePattern = /(\d{1,2}\/\d{1,2}(?:\/\d{4})?)/g;
-      const timePattern = /(\d{1,2}:\d{2})/g;
+      for (let status of statusPatterns) {
+        if (pageText.includes(status)) {
+          resultado.status = status;
+          break;
+        }
+      }
 
-      const elementos = document.querySelectorAll('div, span, p, li');
-
-      elementos.forEach((el) => {
-        const txt = el.innerText || '';
-
-        if (datePattern.test(txt)) {
-          const data = txt.match(datePattern)?.[0] || '';
-          const hora = txt.match(timePattern)?.[0] || '';
-
-          let descricao = txt
-            .replace(datePattern, '')
-            .replace(timePattern, '')
-            .trim()
-            .substring(0, 120);
-
-          if (descricao.length > 5) {
-            resultado.eventos.push({
-              descricao,
-              data,
-              hora,
-              local: ''
-            });
+      // ============================================
+      // EXTRAIR EVENTOS DA TIMELINE
+      // ============================================
+      
+      // Padrões para extrair dados
+      const horaPattern = /(\d{2}:\d{2}:\d{2})/;
+      const dataPattern = /(\d{1,2}\s+[A-Za-z]+\s+\d{4})/;
+      
+      // Dividir o texto em linhas
+      const linhas = pageText.split('\n').filter(l => l.trim().length > 0);
+      
+      let i = 0;
+      while (i < linhas.length) {
+        const linha = linhas[i].trim();
+        
+        // Procurar por padrão de hora
+        const horaMatch = linha.match(horaPattern);
+        
+        if (horaMatch) {
+          const hora = horaMatch[1];
+          let data = '';
+          let descricao = '';
+          let local = '';
+          
+          // A próxima linha geralmente contém a data
+          if (i + 1 < linhas.length) {
+            const proximaLinha = linhas[i + 1].trim();
+            const dataMatch = proximaLinha.match(dataPattern);
+            
+            if (dataMatch) {
+              data = dataMatch[1];
+              
+              // A próxima linha após a data é a descrição
+              if (i + 2 < linhas.length) {
+                descricao = linhas[i + 2].trim();
+                
+                // Extrair local da descrição (geralmente entre : e - ou no final)
+                const localMatch = descricao.match(/:\s*([^-]+)\s*-\s*([A-Z]{2})/);
+                if (localMatch) {
+                  local = localMatch[1].trim() + ' - ' + localMatch[2];
+                } else {
+                  // Tentar extrair apenas o estado (UF)
+                  const ufMatch = descricao.match(/([A-Z]{2})(?:\s|$)/);
+                  if (ufMatch) {
+                    local = ufMatch[1];
+                  }
+                }
+              }
+              
+              // Adicionar evento se temos pelo menos hora e data
+              if (hora && data) {
+                resultado.eventos.push({
+                  hora: hora,
+                  data: data,
+                  descricao: descricao,
+                  local: local
+                });
+              }
+              
+              // Pular as próximas linhas já processadas
+              i += 3;
+              continue;
+            }
           }
         }
-      });
+        
+        i++;
+      }
 
       return resultado;
     });
 
-    // 🚀 FALLBACK COM API INTERNA
-    if (dados.eventos.length === 0 && responsesCapturados.length > 0) {
-      for (let r of responsesCapturados) {
-        const d = r.data;
-
-        if (Array.isArray(d)) {
-          dados.eventos = d.slice(0, 10).map(item => ({
-            descricao: item.description || item.title || 'Evento',
-            data: item.date || '',
-            hora: item.time || '',
-            local: item.location || ''
-          }));
-        } else if (d?.events || d?.eventos) {
-          const events = d.events || d.eventos;
-
-          if (Array.isArray(events)) {
-            dados.eventos = events.slice(0, 10).map(item => ({
-              descricao: item.description || item.title || 'Evento',
-              data: item.date || '',
-              hora: item.time || '',
-              local: item.location || ''
-            }));
-          }
-        }
-      }
-    }
-
+    // Fechar o navegador
     await browser.close();
 
-    // 🚀 PROTEÇÃO FINAL
-    if (!dados.status || dados.status.length < 3) {
-      dados.status = 'Em processamento';
-    }
-
-    if (!dados.eventos) dados.eventos = [];
-
-    return res.json({
-      sucesso: true,
-      codigo,
-      ...dados
-    });
+    // Retornar dados
+    return res.json(dados);
 
   } catch (erro) {
-    console.error('❌ ERRO:', erro.message);
-
+    console.error(`[${new Date().toISOString()}] Erro ao rastrear ${codigo}:`, erro.message);
+    
     if (browser) {
-      try { await browser.close(); } catch {}
+      try {
+        await browser.close();
+      } catch (e) {
+        // Ignorar erro ao fechar
+      }
     }
 
     return res.status(500).json({
       erro: true,
-      mensagem: 'Erro ao rastrear',
-      detalhes: erro.message
+      mensagem: 'Erro ao rastrear pedido. Tente novamente mais tarde.',
+      detalhes: process.env.NODE_ENV === 'development' ? erro.message : undefined
     });
   }
 });
@@ -207,12 +231,18 @@ app.get('/rastreio/:codigo', async (req, res) => {
 // Rota raiz
 app.get('/', (req, res) => {
   res.json({
-    nome: 'API Sermente',
-    status: 'online'
+    nome: 'API de Rastreamento Sermente',
+    versao: '1.0.0',
+    endpoints: {
+      health: 'GET /health',
+      rastreio: 'GET /rastreio/:codigo'
+    }
   });
 });
 
-// Start
+// Iniciar servidor
 app.listen(PORT, () => {
-  console.log(`🚀 Rodando na porta ${PORT}`);
+  console.log(`Servidor de rastreamento rodando em http://localhost:${PORT}`);
+  console.log(`Health check: http://localhost:${PORT}/health`);
+  console.log(`Rastreamento: http://localhost:${PORT}/rastreio/{codigo}`);
 });
