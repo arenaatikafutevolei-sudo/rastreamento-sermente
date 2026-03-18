@@ -1,5 +1,5 @@
 /**
- * Servidor de Rastreamento Sermente (VERSÃO OTIMIZADA PARA RAILWAY)
+ * Servidor de Rastreamento Sermente (OTIMIZADO PARA RAILWAY)
  */
 
 const express = require('express');
@@ -14,12 +14,12 @@ const PORT = process.env.PORT || 3001;
 app.use(cors());
 app.use(express.json());
 
-// Health Check
+// Health check
 app.get('/health', (req, res) => {
   res.json({ status: 'OK', message: 'Servidor ativo 🚀' });
 });
 
-// Rota de rastreio
+// Endpoint principal
 app.get('/rastreio/:codigo', async (req, res) => {
   const { codigo } = req.params;
 
@@ -35,6 +35,7 @@ app.get('/rastreio/:codigo', async (req, res) => {
   try {
     console.log(`🔍 Rastreando: ${codigo}`);
 
+    // 🚀 CONFIGURAÇÃO OTIMIZADA PRO RAILWAY
     browser = await puppeteer.launch({
       headless: 'new',
       executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
@@ -53,75 +54,134 @@ app.get('/rastreio/:codigo', async (req, res) => {
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
     );
 
-    page.setDefaultTimeout(20000);
-    page.setDefaultNavigationTimeout(20000);
+    page.setDefaultTimeout(30000);
+    page.setDefaultNavigationTimeout(30000);
 
     const url = `https://spx.com.br/track?${encodeURIComponent(codigo)}`;
 
-    await page.goto(url, { waitUntil: 'domcontentloaded' });
+    // 🚀 CARREGAMENTO ESTÁVEL
+    await page.goto(url, {
+      waitUntil: 'domcontentloaded',
+      timeout: 30000
+    });
 
-    // Espera inteligente (evita página vazia)
+    // 🚀 ESPERA INTELIGENTE
     await page.waitForFunction(() => {
       return document.body && document.body.innerText.length > 100;
     }, { timeout: 10000 }).catch(() => null);
 
-    // Tempo extra pro JS da SPX renderizar
-    await page.waitForTimeout(6000);
+    await page.waitForTimeout(5000);
 
+    // 🚀 CAPTURA CONTROLADA (EVITA TRAVAMENTO)
+    const responsesCapturados = [];
+
+    page.on('response', async (response) => {
+      try {
+        const url = response.url();
+        const status = response.status();
+
+        if (
+          (url.includes('track') || url.includes('tracking') || url.includes('rastr')) &&
+          status === 200
+        ) {
+          const contentType = response.headers()['content-type'] || '';
+
+          if (contentType.includes('application/json')) {
+            const data = await response.json().catch(() => null);
+            if (data) {
+              responsesCapturados.push({ url, data });
+            }
+          }
+        }
+      } catch {}
+    });
+
+    // 🚀 SCRAPING PRINCIPAL
     const dados = await page.evaluate(() => {
       const resultado = {
         status: 'Informação não disponível',
         eventos: []
       };
 
-      const pageText = document.body.innerText;
+      const text = document.body.innerText;
 
-      if (
-        pageText.includes('não gerou resultados') ||
-        pageText.includes('não encontrado')
-      ) {
+      if (text.includes('não gerou resultados') || text.includes('não encontrado')) {
         resultado.status = 'Código não encontrado';
         return resultado;
       }
 
       // STATUS
-      const statusElements = document.querySelectorAll(
-        '.tracking-status, .status, [class*="status"], .current-status'
-      );
+      const match = text.match(/Status[:\s]+(.*?)(?:\n|$)/i);
+      if (match) resultado.status = match[1].trim();
 
-      if (statusElements.length > 0) {
-        const txt = statusElements[0].textContent.trim();
-        if (txt) resultado.status = txt;
-      }
+      // EVENTOS POR DATA
+      const datePattern = /(\d{1,2}\/\d{1,2}(?:\/\d{4})?)/g;
+      const timePattern = /(\d{1,2}:\d{2})/g;
 
-      if (
-        resultado.status === 'Informação não disponível' ||
-        resultado.status.length < 3
-      ) {
-        const match = pageText.match(/Status[:\s]+(.*?)(?:\n|$)/i);
-        if (match) resultado.status = match[1].trim();
-      }
+      const elementos = document.querySelectorAll('div, span, p, li');
 
-      // EVENTOS
-      const eventos = document.querySelectorAll(
-        '.event, .timeline-item, [class*="event"], [class*="timeline"]'
-      );
+      elementos.forEach((el) => {
+        const txt = el.innerText || '';
 
-      eventos.forEach((el) => {
-        const descricao = el.textContent.trim();
+        if (datePattern.test(txt)) {
+          const data = txt.match(datePattern)?.[0] || '';
+          const hora = txt.match(timePattern)?.[0] || '';
 
-        if (descricao && descricao.length > 5) {
-          resultado.eventos.push({
-            descricao,
-            data: '—'
-          });
+          let descricao = txt
+            .replace(datePattern, '')
+            .replace(timePattern, '')
+            .trim()
+            .substring(0, 120);
+
+          if (descricao.length > 5) {
+            resultado.eventos.push({
+              descricao,
+              data,
+              hora,
+              local: ''
+            });
+          }
         }
       });
 
       return resultado;
     });
 
+    // 🚀 FALLBACK COM API INTERNA
+    if (dados.eventos.length === 0 && responsesCapturados.length > 0) {
+      for (let r of responsesCapturados) {
+        const d = r.data;
+
+        if (Array.isArray(d)) {
+          dados.eventos = d.slice(0, 10).map(item => ({
+            descricao: item.description || item.title || 'Evento',
+            data: item.date || '',
+            hora: item.time || '',
+            local: item.location || ''
+          }));
+        } else if (d?.events || d?.eventos) {
+          const events = d.events || d.eventos;
+
+          if (Array.isArray(events)) {
+            dados.eventos = events.slice(0, 10).map(item => ({
+              descricao: item.description || item.title || 'Evento',
+              data: item.date || '',
+              hora: item.time || '',
+              local: item.location || ''
+            }));
+          }
+        }
+      }
+    }
+
     await browser.close();
+
+    // 🚀 PROTEÇÃO FINAL
+    if (!dados.status || dados.status.length < 3) {
+      dados.status = 'Em processamento';
+    }
+
+    if (!dados.eventos) dados.eventos = [];
 
     return res.json({
       sucesso: true,
@@ -133,9 +193,7 @@ app.get('/rastreio/:codigo', async (req, res) => {
     console.error('❌ ERRO:', erro.message);
 
     if (browser) {
-      try {
-        await browser.close();
-      } catch {}
+      try { await browser.close(); } catch {}
     }
 
     return res.status(500).json({
@@ -146,9 +204,12 @@ app.get('/rastreio/:codigo', async (req, res) => {
   }
 });
 
-// 404
-app.use((req, res) => {
-  res.status(404).json({ erro: true, mensagem: 'Rota não encontrada' });
+// Rota raiz
+app.get('/', (req, res) => {
+  res.json({
+    nome: 'API Sermente',
+    status: 'online'
+  });
 });
 
 // Start
