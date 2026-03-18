@@ -1,5 +1,5 @@
 /**
- * Servidor de Rastreamento Sermente - OTIMIZADO PARA RAILWAY
+ * Servidor de Rastreamento Sermente (VERSÃO OTIMIZADA PARA RAILWAY)
  */
 
 const express = require('express');
@@ -8,18 +8,18 @@ const puppeteer = require('puppeteer');
 require('dotenv').config();
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3001;
 
 // Middleware
 app.use(cors());
 app.use(express.json());
 
-// Health check
+// Health Check
 app.get('/health', (req, res) => {
-  res.json({ status: 'OK' });
+  res.json({ status: 'OK', message: 'Servidor ativo 🚀' });
 });
 
-// Endpoint de rastreio
+// Rota de rastreio
 app.get('/rastreio/:codigo', async (req, res) => {
   const { codigo } = req.params;
 
@@ -33,74 +33,115 @@ app.get('/rastreio/:codigo', async (req, res) => {
   let browser;
 
   try {
-    console.log('Rastreando:', codigo);
+    console.log(`🔍 Rastreando: ${codigo}`);
 
     browser = await puppeteer.launch({
-      headless: true,
+      headless: 'new',
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
         '--disable-gpu',
-        '--single-process',
-        '--no-zygote'
+        '--single-process'
       ]
     });
 
     const page = await browser.newPage();
 
-    await page.setViewport({ width: 1280, height: 800 });
-
-    page.setDefaultTimeout(30000);
-    page.setDefaultNavigationTimeout(30000);
-
     await page.setUserAgent(
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
     );
+
+    page.setDefaultTimeout(20000);
+    page.setDefaultNavigationTimeout(20000);
 
     const url = `https://spx.com.br/track?${encodeURIComponent(codigo)}`;
 
     await page.goto(url, { waitUntil: 'domcontentloaded' });
 
-    // esperar carregar
-    await new Promise(resolve => setTimeout(resolve, 3000));
+    // Espera inteligente (evita página vazia)
+    await page.waitForFunction(() => {
+      return document.body && document.body.innerText.length > 100;
+    }, { timeout: 10000 }).catch(() => null);
+
+    // Tempo extra pro JS da SPX renderizar
+    await page.waitForTimeout(6000);
 
     const dados = await page.evaluate(() => {
       const resultado = {
-        status: 'Não encontrado',
+        status: 'Informação não disponível',
         eventos: []
       };
 
-      const texto = document.body.innerText;
+      const pageText = document.body.innerText;
 
-      if (texto.includes('não gerou resultados') || texto.includes('não encontrado')) {
+      if (
+        pageText.includes('não gerou resultados') ||
+        pageText.includes('não encontrado')
+      ) {
+        resultado.status = 'Código não encontrado';
         return resultado;
       }
 
-      resultado.status = 'Em transporte';
+      // STATUS
+      const statusElements = document.querySelectorAll(
+        '.tracking-status, .status, [class*="status"], .current-status'
+      );
+
+      if (statusElements.length > 0) {
+        const txt = statusElements[0].textContent.trim();
+        if (txt) resultado.status = txt;
+      }
+
+      if (
+        resultado.status === 'Informação não disponível' ||
+        resultado.status.length < 3
+      ) {
+        const match = pageText.match(/Status[:\s]+(.*?)(?:\n|$)/i);
+        if (match) resultado.status = match[1].trim();
+      }
+
+      // EVENTOS
+      const eventos = document.querySelectorAll(
+        '.event, .timeline-item, [class*="event"], [class*="timeline"]'
+      );
+
+      eventos.forEach((el) => {
+        const descricao = el.textContent.trim();
+
+        if (descricao && descricao.length > 5) {
+          resultado.eventos.push({
+            descricao,
+            data: '—'
+          });
+        }
+      });
 
       return resultado;
     });
 
     await browser.close();
 
-    res.json({
+    return res.json({
       sucesso: true,
       codigo,
       ...dados
     });
 
   } catch (erro) {
-    console.error('Erro:', erro.message);
+    console.error('❌ ERRO:', erro.message);
 
     if (browser) {
-      try { await browser.close(); } catch {}
+      try {
+        await browser.close();
+      } catch {}
     }
 
-    res.status(500).json({
+    return res.status(500).json({
       erro: true,
       mensagem: 'Erro ao rastrear',
-      detalhe: erro.message
+      detalhes: erro.message
     });
   }
 });
@@ -112,5 +153,5 @@ app.use((req, res) => {
 
 // Start
 app.listen(PORT, () => {
-  console.log('Servidor rodando na porta', PORT);
+  console.log(`🚀 Rodando na porta ${PORT}`);
 });
