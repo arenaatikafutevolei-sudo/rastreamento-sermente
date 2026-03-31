@@ -46,27 +46,33 @@ def get_tracking_formatted(tracking_number):
             status_text = records[0].get("description") or "Em trânsito"
 
         eventos = []
+eventos_unicos = set()
 
-        for item in records:
-            if item.get("display_flag_v2", 0) > 0:
-                timestamp = item.get("actual_time")
+for item in records:
+    if item.get("display_flag_v2", 0) > 0:
+        timestamp = item.get("actual_time")
 
-                if timestamp:
-                    try:
-                        dt_object = datetime.fromtimestamp(timestamp)
-                        data_str = dt_object.strftime("%d/%m/%Y %H:%M")
-                    except:
-                        data_str = ""
-                else:
-                    data_str = ""
+        if timestamp:
+            try:
+                dt_object = datetime.fromtimestamp(timestamp)
+                data_str = dt_object.strftime("%d/%m/%Y %H:%M")
+            except:
+                data_str = ""
+        else:
+            data_str = ""
 
-                # 🔥 CORREÇÃO: priorizar descrição correta
-                descricao = item.get("seller_description") or item.get("description") or "Atualização"
+        descricao = item.get("seller_description") or item.get("description") or "Atualização"
 
-                eventos.append({
-                    "data": data_str,
-                    "descricao": descricao
-                })
+        # 🔥 chave única (data + descrição)
+        chave = f"{data_str}-{descricao}"
+
+        if chave not in eventos_unicos:
+            eventos_unicos.add(chave)
+
+            eventos.append({
+                "data": data_str,
+                "descricao": descricao
+            })
 
         return {
             "status": status_text,
