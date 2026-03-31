@@ -1,5 +1,5 @@
 /**
- * Servidor de Rastreamento Sermente (VERSÃO CORRIGIDA)
+ * Servidor de Rastreamento Sermente (VERSÃO FINAL COM BYPASS)
  */
 
 const express = require('express');
@@ -31,17 +31,32 @@ app.get('/rastreio/:codigo', async (req, res) => {
 
   try {
     browser = await puppeteer.launch({
-      headless: true,
+      headless: "new", // 👈 mais estável no Railway
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
-        '--disable-gpu'
+        '--disable-gpu',
+        '--window-size=1920,1080'
       ]
     });
 
     const page = await browser.newPage();
 
+    // 👇 viewport realista
+    await page.setViewport({
+      width: 1366,
+      height: 768
+    });
+
+    // 👇 remove detecção de bot
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, 'webdriver', {
+        get: () => false,
+      });
+    });
+
+    // 👇 user agent real
     await page.setUserAgent(
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36'
     );
@@ -51,12 +66,15 @@ app.get('/rastreio/:codigo', async (req, res) => {
     console.log('Rastreando:', codigo);
     console.log('URL:', url);
 
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.goto(url, {
+      waitUntil: 'domcontentloaded',
+      timeout: 30000
+    });
 
-    // espera JS carregar
-    await new Promise(resolve => setTimeout(resolve, 6000));
+    // 👇 espera carregamento real
+    await page.waitForSelector('body', { timeout: 15000 });
+    await new Promise(resolve => setTimeout(resolve, 5000));
 
-    // 🔥 DEBUG REAL
     const texto = await page.evaluate(() => document.body.innerText);
 
     if (!texto || texto.length < 50) {
@@ -64,10 +82,10 @@ app.get('/rastreio/:codigo', async (req, res) => {
     }
 
     // ==========================
-    // EXTRAÇÃO SIMPLES (robusta)
+    // EXTRAÇÃO DE DADOS
     // ==========================
-    const eventos = [];
 
+    const eventos = [];
     const linhas = texto.split('\n').map(l => l.trim()).filter(Boolean);
 
     let status = 'Em processamento';
@@ -76,7 +94,6 @@ app.get('/rastreio/:codigo', async (req, res) => {
     else if (texto.toLowerCase().includes('saiu para entrega')) status = 'Saiu para entrega';
     else if (texto.toLowerCase().includes('trânsito')) status = 'Em transporte';
 
-    // pega blocos simples
     for (let i = 0; i < linhas.length; i++) {
       if (linhas[i].match(/\d{2}:\d{2}:\d{2}/)) {
         eventos.push({
@@ -106,7 +123,7 @@ app.get('/rastreio/:codigo', async (req, res) => {
 
     return res.status(500).json({
       erro: true,
-      mensagem: erro.message // 👈 agora mostra erro real
+      mensagem: erro.message
     });
   }
 });
