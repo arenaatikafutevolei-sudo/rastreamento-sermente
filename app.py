@@ -2,6 +2,7 @@ from flask import Flask, jsonify
 from flask_cors import CORS
 import requests
 from datetime import datetime
+import os
 
 app = Flask(__name__)
 CORS(app)
@@ -35,20 +36,14 @@ def get_tracking_formatted(tracking_number):
         sls_info = data.get("data", {}).get("sls_tracking_info", {})
         records = sls_info.get("records", [])
 
+        # 🔥 CORREÇÃO: ordenar do mais recente para o mais antigo
+        records = sorted(records, key=lambda x: x.get("actual_time", 0), reverse=True)
+
         status_text = "Em trânsito"
 
+        # 🔥 CORREÇÃO: pegar status real baseado no evento mais recente
         if records:
-            milestone = records[0].get("milestone_code", 2)
-
-            status_map = {
-                1: "Em preparação",
-                2: "Em trânsito",
-                3: "Em trânsito",
-                4: "Saiu para entrega",
-                5: "Entregue"
-            }
-
-            status_text = status_map.get(milestone, "Em trânsito")
+            status_text = records[0].get("description") or "Em trânsito"
 
         eventos = []
 
@@ -57,12 +52,16 @@ def get_tracking_formatted(tracking_number):
                 timestamp = item.get("actual_time")
 
                 if timestamp:
-                    dt_object = datetime.fromtimestamp(timestamp)
-                    data_str = dt_object.strftime("%d/%m/%Y %H:%M")
+                    try:
+                        dt_object = datetime.fromtimestamp(timestamp)
+                        data_str = dt_object.strftime("%d/%m/%Y %H:%M")
+                    except:
+                        data_str = ""
                 else:
                     data_str = ""
 
-                descricao = item.get("description") or item.get("seller_description")
+                # 🔥 CORREÇÃO: priorizar descrição correta
+                descricao = item.get("seller_description") or item.get("description") or "Atualização"
 
                 eventos.append({
                     "data": data_str,
@@ -88,9 +87,6 @@ def rastrear(codigo):
 def home():
     return "API de rastreamento funcionando 🚚"
 
-
-if __name__ == "__main__":
-    import os
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
