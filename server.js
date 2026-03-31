@@ -4,7 +4,7 @@
 
 const express = require('express');
 const cors = require('cors');
-const puppeteer = require('puppeteer-core');
+const puppeteer = require('puppeteer');
 require('dotenv').config();
 
 const app = express();
@@ -31,7 +31,6 @@ app.get('/rastreio/:codigo', async (req, res) => {
 
   try {
     browser = await puppeteer.launch({
-      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
       headless: true,
       args: [
         '--no-sandbox',
