@@ -8,7 +8,7 @@
 
 const express = require('express');
 const cors = require('cors');
-const puppeteer = require('puppeteer');
+const puppeteer = require('puppeteer-core');
 require('dotenv').config();
 
 const app = express();
@@ -59,14 +59,15 @@ app.get('/rastreio/:codigo', async (req, res) => {
   try {
     // Inicializar Puppeteer com opções de sandbox desabilitadas
     browser = await puppeteer.launch({
-      headless: 'new',
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu'
-      ]
-    });
+  executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
+  headless: 'new',
+  args: [
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-dev-shm-usage',
+    '--disable-gpu'
+  ]
+});
 
     // Criar nova página
     const page = await browser.newPage();
