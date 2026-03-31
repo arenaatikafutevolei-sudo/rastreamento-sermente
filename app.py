@@ -56,14 +56,16 @@ for item in records:
             try:
                 dt_object = datetime.fromtimestamp(timestamp)
                 data_str = dt_object.strftime("%d/%m/%Y %H:%M")
-            except:
+            except Exception:
                 data_str = ""
         else:
             data_str = ""
 
         descricao = item.get("seller_description") or item.get("description") or "Atualização"
 
-        # 🔥 chave única (data + descrição)
+        # evitar None quebrando string
+        descricao = str(descricao)
+
         chave = f"{data_str}-{descricao}"
 
         if chave not in eventos_unicos:
