@@ -1,10 +1,9 @@
 /**
- * Servidor de Rastreamento Sermente (VERSÃO FINAL COM BYPASS)
+ * Servidor de Rastreamento Sermente (VERSÃO FINAL - API DIRETA SPX)
  */
 
 const express = require('express');
 const cors = require('cors');
-const puppeteer = require('puppeteer');
 require('dotenv').config();
 
 const app = express();
@@ -27,99 +26,45 @@ app.get('/rastreio/:codigo', async (req, res) => {
     });
   }
 
-  let browser;
-
   try {
-    browser = await puppeteer.launch({
-      headless: "new", // 👈 mais estável no Railway
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--window-size=1920,1080'
-      ]
-    });
+    console.log('Rastreando:', codigo);
 
-    const page = await browser.newPage();
-
-    // 👇 viewport realista
-    await page.setViewport({
-      width: 1366,
-      height: 768
-    });
-
-    // 👇 remove detecção de bot
-    await page.evaluateOnNewDocument(() => {
-      Object.defineProperty(navigator, 'webdriver', {
-        get: () => false,
-      });
-    });
-
-    // 👇 user agent real
-    await page.setUserAgent(
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36'
+    const response = await fetch(
+      `https://spx.com.br/api/v2/tracking?trackingNumber=${codigo}`,
+      {
+        method: 'GET',
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+          'Accept': 'application/json',
+          'Referer': 'https://spx.com.br/',
+          'Origin': 'https://spx.com.br'
+        }
+      }
     );
 
-    const url = `https://spx.com.br/track?trackingNumber=${codigo}`;
-
-    console.log('Rastreando:', codigo);
-    console.log('URL:', url);
-
-    await page.goto(url, {
-      waitUntil: 'domcontentloaded',
-      timeout: 30000
-    });
-
-    // 👇 espera carregamento real
-    await page.waitForSelector('body', { timeout: 15000 });
-    await new Promise(resolve => setTimeout(resolve, 5000));
-
-    const texto = await page.evaluate(() => document.body.innerText);
-
-    if (!texto || texto.length < 50) {
-      throw new Error('Página vazia ou bloqueada pela SPX');
+    if (!response.ok) {
+      throw new Error(`Erro na API SPX: ${response.status}`);
     }
 
-    // ==========================
-    // EXTRAÇÃO DE DADOS
-    // ==========================
+    const data = await response.json();
 
-    const eventos = [];
-    const linhas = texto.split('\n').map(l => l.trim()).filter(Boolean);
-
-    let status = 'Em processamento';
-
-    if (texto.toLowerCase().includes('entregue')) status = 'Entregue';
-    else if (texto.toLowerCase().includes('saiu para entrega')) status = 'Saiu para entrega';
-    else if (texto.toLowerCase().includes('trânsito')) status = 'Em transporte';
-
-    for (let i = 0; i < linhas.length; i++) {
-      if (linhas[i].match(/\d{2}:\d{2}:\d{2}/)) {
-        eventos.push({
-          hora: linhas[i],
-          data: linhas[i + 1] || '',
-          descricao: linhas[i + 2] || '',
-          local: linhas[i + 3] || ''
-        });
-      }
+    // 🔥 validação segura
+    if (!data || !data.data) {
+      throw new Error('Rastreamento não encontrado');
     }
 
-    await browser.close();
+    const eventos = data.data.events || [];
+
+    // 👇 normaliza status
+    let status = data.data.status || 'Em processamento';
 
     return res.json({
       status,
-      eventos: eventos.length > 0 ? eventos : [
-        { descricao: texto.slice(0, 300) }
-      ]
+      eventos
     });
 
   } catch (erro) {
     console.error('ERRO REAL:', erro.message);
-
-    if (browser) {
-      try { await browser.close(); } catch {}
-    }
 
     return res.status(500).json({
       erro: true,
