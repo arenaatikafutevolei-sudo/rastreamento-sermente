@@ -1,5 +1,5 @@
 /**
- * Servidor de Rastreamento Sermente (VERSÃO FINAL - API DIRETA SPX)
+ * Servidor de Rastreamento Sermente (VERSÃO CORRIGIDA - API SPX 2026)
  */
 
 const express = require('express');
@@ -29,18 +29,18 @@ app.get('/rastreio/:codigo', async (req, res) => {
   try {
     console.log('Rastreando:', codigo);
 
-    const response = await fetch(
-      `https://spx.com.br/api/v2/tracking?trackingNumber=${codigo}`,
-      {
-        method: 'GET',
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-          'Accept': 'application/json',
-          'Referer': 'https://spx.com.br/',
-          'Origin': 'https://spx.com.br'
-        }
+    // NOVO ENDPOINT DESCOBERTO
+    const url = `https://spx.com.br/shipment/order/open/order/get_order_info?spx_tn=${codigo}&language_code=pt`;
+
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/plain, */*',
+        'Referer': `https://spx.com.br/track?${codigo}`, // OBRIGATÓRIO PARA EVITAR BLOQUEIO
+        'X-Requested-With': 'XMLHttpRequest'
       }
-    );
+    });
 
     if (!response.ok) {
       throw new Error(`Erro na API SPX: ${response.status}`);
@@ -48,15 +48,51 @@ app.get('/rastreio/:codigo', async (req, res) => {
 
     const data = await response.json();
 
-    // 🔥 validação segura
-    if (!data || !data.data) {
-      throw new Error('Rastreamento não encontrado');
+    // Validação do retorno da SPX (retcode 0 significa sucesso)
+    if (!data || data.retcode !== 0 || !data.data || !data.data.sls_tracking_info) {
+      return res.status(404).json({
+        status: "Não encontrado",
+        eventos: [{ descricao: "Sua busca não gerou resultados" }]
+      });
     }
 
-    const eventos = data.data.events || [];
+    const slsInfo = data.data.sls_tracking_info;
+    const records = slsInfo.records || [];
 
-    // 👇 normaliza status
-    let status = data.data.status || 'Em processamento';
+    // Mapeamento de status baseado no milestone do evento mais recente
+    const statusMap = {
+      1: "Em preparação",
+      2: "Em trânsito",
+      3: "Em trânsito",
+      4: "Saiu para entrega",
+      5: "Entregue"
+    };
+
+    let status = "Em processamento";
+    if (records.length > 0) {
+      const lastMilestone = records[0].milestone_code;
+      status = statusMap[lastMilestone] || "Em trânsito";
+    }
+
+    // Normaliza os eventos para o formato que sua index espera
+    const eventos = records
+      .filter(item => item.display_flag_v2 > 0) // Apenas eventos visíveis
+      .map(item => {
+        // Converte timestamp para data legível
+        const date = new Date(item.actual_time * 1000);
+        const dataFormatada = date.toLocaleString('pt-BR', { 
+          day: '2-digit', 
+          month: '2-digit', 
+          year: 'numeric', 
+          hour: '2-digit', 
+          minute: '2-digit' 
+        });
+
+        return {
+          data: dataFormatada,
+          descricao: item.description || item.seller_description
+        };
+      });
 
     return res.json({
       status,
@@ -68,7 +104,7 @@ app.get('/rastreio/:codigo', async (req, res) => {
 
     return res.status(500).json({
       erro: true,
-      mensagem: erro.message
+      mensagem: "Erro ao consultar rastreio. Tente novamente mais tarde."
     });
   }
 });
