@@ -3,7 +3,7 @@ from flask_cors import CORS
 import requests
 from datetime import datetime
 import os
-import json
+import time
 
 app = Flask(__name__)
 CORS(app)
@@ -53,8 +53,7 @@ def get_spx_tracking(tracking_number):
         return {"erro": True, "mensagem": f"Erro SPX: {str(e)}"}
 
 def get_global_tracking(tracking_number):
-    """Lógica de rastreamento global via API do ParcelsApp"""
-    # O ParcelsApp usa um endpoint de API para buscar os dados reais
+    """Lógica de rastreamento global via API do ParcelsApp com Retry"""
     api_url = "https://parcelsapp.com/api/v2/parcels"
     
     payload = {
@@ -71,53 +70,52 @@ def get_global_tracking(tracking_number):
         "Origin": "https://parcelsapp.com"
     }
 
-    try:
-        # Faz a requisição POST para a API do ParcelsApp
-        response = requests.post(api_url, json=payload, headers=headers, timeout=20)
-        
-        if response.status_code != 200:
-            return {"erro": True, "mensagem": f"Erro ParcelsApp: {response.status_code}"}
+    # Lógica de Retry: Tenta até 3 vezes com intervalo de 3 segundos
+    # Isso é necessário porque o ParcelsApp inicia a busca em tempo real
+    for attempt in range(3):
+        try:
+            response = requests.post(api_url, json=payload, headers=headers, timeout=25)
+            
+            if response.status_code == 200:
+                data = response.json()
+                states = data.get("states", [])
+                
+                if states:
+                    # Ordena eventos (mais recente primeiro)
+                    states = sorted(states, key=lambda x: x.get("date", ""), reverse=True)
+                    status_text = states[0].get("status") or "Em trânsito (Global)"
+                    eventos = []
 
-        data = response.json()
-        
-        # O ParcelsApp retorna uma lista de 'states' que são os eventos
-        states = data.get("states", [])
-        if not states:
-            return {"erro": True, "mensagem": "Nenhuma informação encontrada para este código global."}
+                    for state in states:
+                        raw_date = state.get("date", "")
+                        try:
+                            if "T" in raw_date:
+                                dt = datetime.fromisoformat(raw_date.replace("Z", "+00:00"))
+                                data_str = dt.strftime("%d/%m/%Y %H:%M")
+                            else:
+                                data_str = raw_date
+                        except:
+                            data_str = raw_date
 
-        # Ordena eventos (mais recente primeiro)
-        states = sorted(states, key=lambda x: x.get("date", ""), reverse=True)
+                        descricao = state.get("status", "")
+                        local = state.get("location", "")
+                        if local:
+                            descricao = f"{descricao} - {local}"
 
-        status_text = states[0].get("status") or "Em trânsito (Global)"
-        eventos = []
+                        eventos.append({"data": data_str, "descricao": descricao})
 
-        for state in states:
-            # Formata a data do ParcelsApp (geralmente ISO ou similar)
-            raw_date = state.get("date", "")
-            try:
-                # Tenta converter a data se for um formato padrão, senão usa como está
-                if "T" in raw_date:
-                    dt = datetime.fromisoformat(raw_date.replace("Z", "+00:00"))
-                    data_str = dt.strftime("%d/%m/%Y %H:%M")
-                else:
-                    data_str = raw_date
-            except:
-                data_str = raw_date
+                    return {"status": status_text, "eventos": eventos}
+            
+            # Se não encontrou nada, aguarda e tenta novamente
+            if attempt < 2:
+                time.sleep(3)
+                
+        except Exception as e:
+            if attempt == 2:
+                return {"erro": True, "mensagem": f"Erro Global: {str(e)}"}
+            time.sleep(3)
 
-            descricao = state.get("status", "")
-            local = state.get("location", "")
-            if local:
-                descricao = f"{descricao} - {local}"
-
-            eventos.append({
-                "data": data_str,
-                "descricao": descricao
-            })
-
-        return {"status": status_text, "eventos": eventos}
-        
-    except Exception as e:
-        return {"erro": True, "mensagem": f"Erro Global: {str(e)}"}
+    return {"erro": True, "mensagem": "Nenhuma informação encontrada. Tente novamente em alguns instantes, pois a busca global pode demorar."}
 
 @app.route("/rastreio/<codigo>")
 def rastrear_spx(codigo):
@@ -131,7 +129,7 @@ def rastrear_global(codigo):
 
 @app.route("/")
 def home():
-    return "API de rastreamento Sermente V4 (Python) 🚚"
+    return "API de rastreamento Sermente V5 (Python) 🚚"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
