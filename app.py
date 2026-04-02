@@ -121,9 +121,15 @@ def rastrear_unificado(codigo):
     
     return jsonify(resultado)
 
+@app.route("/rastreio-global/<codigo>")
+def rastrear_global_direto(codigo):
+    """Rota direta para o ParcelsApp se necessário"""
+    resultado = get_global_tracking(codigo)
+    return jsonify(resultado)
+
 @app.route("/")
 def home():
-    return "API de rastreamento Sermente V9 (Limpa) 🚚"
+    return "API de rastreamento Sermente V10 (Definitiva) 🚚"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
