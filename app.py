@@ -4,6 +4,7 @@ import requests
 from datetime import datetime
 import os
 import time
+import re
 
 app = Flask(__name__)
 CORS(app)
@@ -56,7 +57,7 @@ def get_spx_tracking(tracking_number):
         return None
 
 def get_global_tracking(tracking_number):
-    """Lógica de rastreamento global via API pública do ParcelsApp"""
+    """Lógica de rastreamento global via API do ParcelsApp com limpeza de eventos"""
     api_url = "https://parcelsapp.com/api/v2/parcels"
     payload = {"trackingId": tracking_number, "language": "pt", "country": "Brazil"}
     headers = {
@@ -86,19 +87,25 @@ def get_global_tracking(tracking_number):
                         local = state.get("location", "")
                         if local:
                             descricao = f"{descricao} ({local})"
-                        eventos.append({"data": data_str, "descricao": str(descricao)})
-                    return {"status": str(status_text), "eventos": eventos}
+                        
+                        # Remove mensagens de link direto ou mensagens técnicas
+                        if "parcelsapp.com" not in str(descricao).lower():
+                            eventos.append({"data": data_str, "descricao": str(descricao)})
+                    
+                    if eventos:
+                        return {"status": str(status_text), "eventos": eventos}
+            
             if attempt == 0:
-                time.sleep(4)
+                time.sleep(5)
         except:
             if attempt == 1: break
-            time.sleep(4)
+            time.sleep(5)
 
+    # Resposta limpa para a index quando não encontra nada
     return {
-        "status": "Em processamento",
+        "status": "Aguardando atualização",
         "eventos": [
-            {"data": datetime.now().strftime("%d/%m/%Y %H:%M"), "descricao": "A transportadora ainda está processando as informações. Tente novamente em 1 minuto."},
-            {"data": "-", "descricao": f"Link direto: https://parcelsapp.com/en/tracking/{tracking_number}"}
+            {"data": datetime.now().strftime("%d/%m/%Y %H:%M"), "descricao": "A transportadora ainda está processando as informações. Tente novamente em alguns instantes."}
         ]
     }
 
@@ -110,20 +117,13 @@ def rastrear_unificado(codigo):
     
     # 2. Se não encontrou na SPX, tenta no ParcelsApp (Global)
     if not resultado:
-        print(f"Código {codigo} não encontrado na SPX, tentando Global...")
         resultado = get_global_tracking(codigo)
     
     return jsonify(resultado)
 
-@app.route("/rastreio-global/<codigo>")
-def rastrear_global_direto(codigo):
-    """Rota direta para o ParcelsApp se necessário"""
-    resultado = get_global_tracking(codigo)
-    return jsonify(resultado)
-
 @app.route("/")
 def home():
-    return "API de rastreamento Sermente V8 (Inteligente) 🚚"
+    return "API de rastreamento Sermente V9 (Limpa) 🚚"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
