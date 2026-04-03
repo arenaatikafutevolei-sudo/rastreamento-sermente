@@ -4,7 +4,6 @@ import requests
 from datetime import datetime
 import os
 import time
-import re
 
 app = Flask(__name__)
 CORS(app)
@@ -56,8 +55,37 @@ def get_spx_tracking(tracking_number):
     except:
         return None
 
+def get_cainiao_tracking(tracking_number):
+    """Lógica de rastreamento direta para Cainiao (AliExpress)"""
+    url = f"https://global.cainiao.com/global/detail.json?mailNos={tracking_number}&lang=pt-BR"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*"
+    }
+
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+        if response.status_code == 200:
+            data = response.json()
+            module = data.get("module", [])
+            if module:
+                detail = module[0]
+                detail_list = detail.get("detailList", [])
+                if detail_list:
+                    status_text = detail.get("statusDesc") or "Em trânsito (Cainiao)"
+                    eventos = []
+                    for item in detail_list:
+                        data_str = item.get("timeStr") or item.get("time") or ""
+                        descricao = item.get("desc") or ""
+                        if data_str and descricao:
+                            eventos.append({"data": str(data_str), "descricao": str(descricao)})
+                    return {"status": str(status_text), "eventos": eventos}
+    except:
+        pass
+    return None
+
 def get_global_tracking(tracking_number):
-    """Lógica de rastreamento global via API do ParcelsApp com limpeza de eventos"""
+    """Lógica de rastreamento global via API do ParcelsApp com limpeza"""
     api_url = "https://parcelsapp.com/api/v2/parcels"
     payload = {"trackingId": tracking_number, "language": "pt", "country": "Brazil"}
     headers = {
@@ -69,7 +97,6 @@ def get_global_tracking(tracking_number):
         "X-Requested-With": "XMLHttpRequest"
     }
 
-    # Tenta 2 vezes com espera para códigos novos
     for attempt in range(2):
         try:
             response = requests.post(api_url, json=payload, headers=headers, timeout=20)
@@ -88,20 +115,17 @@ def get_global_tracking(tracking_number):
                         if local:
                             descricao = f"{descricao} ({local})"
                         
-                        # Remove mensagens de link direto ou mensagens técnicas
                         if "parcelsapp.com" not in str(descricao).lower():
                             eventos.append({"data": data_str, "descricao": str(descricao)})
                     
                     if eventos:
                         return {"status": str(status_text), "eventos": eventos}
-            
             if attempt == 0:
                 time.sleep(5)
         except:
             if attempt == 1: break
             time.sleep(5)
 
-    # Resposta limpa para a index quando não encontra nada
     return {
         "status": "Aguardando atualização",
         "eventos": [
@@ -111,25 +135,27 @@ def get_global_tracking(tracking_number):
 
 @app.route("/rastreio/<codigo>")
 def rastrear_unificado(codigo):
-    """ROTA UNIFICADA: Tenta SPX primeiro, se falhar tenta Global"""
+    """ROTA UNIFICADA: Tenta SPX -> Cainiao -> Global"""
     # 1. Tenta SPX
     resultado = get_spx_tracking(codigo)
+    if resultado: return jsonify(resultado)
     
-    # 2. Se não encontrou na SPX, tenta no ParcelsApp (Global)
-    if not resultado:
-        resultado = get_global_tracking(codigo)
+    # 2. Tenta Cainiao (para códigos AP, LP, etc.)
+    resultado = get_cainiao_tracking(codigo)
+    if resultado: return jsonify(resultado)
     
+    # 3. Tenta ParcelsApp (Global)
+    resultado = get_global_tracking(codigo)
     return jsonify(resultado)
 
 @app.route("/rastreio-global/<codigo>")
 def rastrear_global_direto(codigo):
-    """Rota direta para o ParcelsApp se necessário"""
     resultado = get_global_tracking(codigo)
     return jsonify(resultado)
 
 @app.route("/")
 def home():
-    return "API de rastreamento Sermente V10 (Definitiva) 🚚"
+    return "API de rastreamento Sermente V11 (Multi-Provedor) 🚚"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
