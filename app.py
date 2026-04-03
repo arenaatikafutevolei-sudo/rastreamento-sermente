@@ -9,7 +9,7 @@ import json
 app = Flask(__name__)
 CORS(app)
 
-# Dicionário de tradução para termos comuns da Cainiao/AliExpress
+# Dicionário de tradução para termos comuns da Cainiao/AliExpress/ParcelsApp
 TRADUCOES = {
     "Leave the warehouse": "Saiu do armazém",
     "Package finished": "Pacote processado e finalizado",
@@ -33,13 +33,15 @@ TRADUCOES = {
     "Departed from departure country": "Partiu do país de origem",
     "Arrived at destination country/region": "Chegou ao país/região de destino",
     "Import customs clearance complete": "Desembaraço aduaneiro de importação concluído",
-    "Import customs clearance started": "Desembaraço aduaneiro de importação iniciado"
+    "Import customs clearance started": "Desembaraço aduaneiro de importação iniciado",
+    "Received by local delivery company": "Recebido pela empresa de entrega local",
+    "Arrived at local sorting center": "Chegou ao centro de triagem local",
+    "Out for delivery": "Saiu para entrega ao destinatário"
 }
 
 def traduzir_descricao(texto):
     if not texto: return "Atualização"
     texto_str = str(texto)
-    # Tenta traduzir termos conhecidos
     for termo_en, termo_pt in TRADUCOES.items():
         if termo_en.lower() in texto_str.lower():
             return termo_pt
@@ -49,10 +51,11 @@ def formatar_data_br(data_str):
     if not data_str: return "-"
     data_str = str(data_str)
     try:
-        # Tenta converter de AAAA-MM-DD HH:MM:SS para DD/MM/AAAA HH:MM
-        # Remove milissegundos e o 'T' se existirem
         limpo = data_str.replace('T', ' ').split('.')[0].split('+')[0].strip()
-        if len(limpo) >= 16: # Formato esperado: YYYY-MM-DD HH:MM
+        if len(limpo) >= 10:
+            if len(limpo) == 10: # Apenas data YYYY-MM-DD
+                dt = datetime.strptime(limpo, "%Y-%m-%d")
+                return dt.strftime("%d/%m/%Y")
             dt = datetime.strptime(limpo[:19], "%Y-%m-%d %H:%M:%S")
             return dt.strftime("%d/%m/%Y %H:%M")
         return data_str
@@ -69,21 +72,17 @@ def get_spx_tracking(tracking_number):
         "Accept": "application/json, text/plain, */*",
         "X-Requested-With": "XMLHttpRequest"
     }
-
     try:
         response = requests.get(url, params=params, headers=headers, timeout=10)
         if response.status_code != 200: return None
         data = response.json()
         if data.get("retcode") != 0: return None
-
         sls_info = data.get("data", {}).get("sls_tracking_info", {})
         order_info = data.get("data", {}).get("order_info", {})
         records = (sls_info.get("records") or []) + (order_info.get("tracking_info") or [])
         if not records: return None
-
         records = sorted(records, key=lambda x: x.get("actual_time", 0), reverse=True)
         status_text = records[0].get("description") or records[0].get("seller_description") or "Em trânsito"
-        
         eventos = []
         eventos_unicos = set()
         for item in records:
@@ -107,7 +106,6 @@ def get_cainiao_tracking(tracking_number):
         "Accept": "application/json, text/plain, */*",
         "Referer": "https://global.cainiao.com/"
     }
-
     try:
         response = requests.get(url, headers=headers, timeout=15)
         if response.status_code == 200:
@@ -132,8 +130,8 @@ def get_cainiao_tracking(tracking_number):
         pass
     return None
 
-def get_global_tracking(tracking_number):
-    """Lógica de rastreamento global via API do ParcelsApp (Fallback)"""
+def get_parcelsapp_tracking(tracking_number):
+    """Lógica de rastreamento global via API do ParcelsApp"""
     api_url = "https://parcelsapp.com/api/v2/parcels"
     payload = {"trackingId": tracking_number, "language": "pt", "country": "Brazil"}
     headers = {
@@ -144,7 +142,6 @@ def get_global_tracking(tracking_number):
         "Origin": "https://parcelsapp.com",
         "X-Requested-With": "XMLHttpRequest"
     }
-
     try:
         response = requests.post(api_url, json=payload, headers=headers, timeout=20)
         if response.status_code == 200:
@@ -165,38 +162,66 @@ def get_global_tracking(tracking_number):
                             "data": formatar_data_br(data_str),
                             "descricao": traduzir_descricao(str(descricao))
                         })
-                if eventos:
-                    return {"status": traduzir_descricao(status_text), "eventos": eventos}
+                return {"status": traduzir_descricao(status_text), "eventos": eventos}
     except:
         pass
-
-    return {
-        "status": "Aguardando atualização",
-        "eventos": [{"data": datetime.now().strftime("%d/%m/%Y %H:%M"), "descricao": "A transportadora ainda está processando as informações. Tente novamente em alguns instantes."}]
-    }
+    return None
 
 @app.route("/rastreio/<codigo>")
 def rastrear_unificado(codigo):
-    """ROTA UNIFICADA: Tenta SPX -> Cainiao -> Global"""
-    resultado = get_spx_tracking(codigo)
-    if resultado: return jsonify(resultado)
+    """ROTA UNIFICADA ULTRA: Tenta SPX -> Mescla Cainiao + ParcelsApp"""
+    # 1. Tenta SPX primeiro (é o mais rápido e específico)
+    resultado_spx = get_spx_tracking(codigo)
+    if resultado_spx: return jsonify(resultado_spx)
     
-    resultado = get_cainiao_tracking(codigo)
-    if resultado: return jsonify(resultado)
+    # 2. Para outros códigos, mescla Cainiao e ParcelsApp para garantir dados completos
+    res_cainiao = get_cainiao_tracking(codigo)
+    res_parcels = get_parcelsapp_tracking(codigo)
     
-    resultado = get_global_tracking(codigo)
-    return jsonify(resultado)
+    if not res_cainiao and not res_parcels:
+        return jsonify({
+            "status": "Aguardando atualização",
+            "eventos": [{"data": datetime.now().strftime("%d/%m/%Y %H:%M"), "descricao": "A transportadora ainda está processando as informações. Tente novamente em alguns instantes."}]
+        })
+    
+    # Mesclagem inteligente de eventos
+    eventos_finais = []
+    chaves_unicas = set()
+    
+    # Adiciona eventos de ambas as fontes
+    todos_eventos = (res_cainiao.get("eventos", []) if res_cainiao else []) + \
+                    (res_parcels.get("eventos", []) if res_parcels else [])
+    
+    # Remove duplicados baseados na descrição e data aproximada
+    for ev in todos_eventos:
+        # Chave simplificada para evitar duplicados quase idênticos
+        chave = f"{ev['data'][:10]}-{ev['descricao'][:20]}".lower()
+        if chave not in chaves_unicas:
+            chaves_unicas.add(chave)
+            eventos_finais.append(ev)
+    
+    # Ordena por data (mais recente primeiro)
+    # Como a data está em formato BR (DD/MM/AAAA), precisamos converter para ordenar
+    try:
+        eventos_finais.sort(key=lambda x: datetime.strptime(x['data'], "%d/%m/%Y %H:%M") if len(x['data']) > 10 else datetime.strptime(x['data'], "%d/%m/%Y"), reverse=True)
+    except:
+        pass # Mantém a ordem original se falhar
 
-@app.route("/rastreio-global/<codigo>")
-def rastrear_global_direto(codigo):
-    resultado = get_cainiao_tracking(codigo)
-    if not resultado:
-        resultado = get_global_tracking(codigo)
-    return jsonify(resultado)
+    # Define o status final (pega o mais recente das fontes)
+    status_final = "Em trânsito"
+    if res_parcels and res_parcels.get("status"):
+        status_final = res_parcels["status"]
+    elif res_cainiao and res_cainiao.get("status"):
+        status_final = res_cainiao["status"]
+
+    return jsonify({
+        "status": status_final,
+        "eventos": eventos_finais
+    })
 
 @app.route("/")
 def home():
-    return "API de rastreamento Sermente V15 (PT-BR Corrigida) 🚚"
+    return "API de rastreamento Sermente V16 (Ultra Unificada) 🚚"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
