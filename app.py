@@ -4,7 +4,6 @@ import requests
 from datetime import datetime
 import os
 import time
-import re
 import json
 
 app = Flask(__name__)
@@ -57,61 +56,74 @@ def get_spx_tracking(tracking_number):
     except:
         return None
 
-def get_global_tracking(tracking_number):
-    """Lógica de rastreamento global via Scraping de HTML do ParcelsApp"""
-    url = f"https://parcelsapp.com/pt/tracking/{tracking_number}"
+def get_cainiao_tracking(tracking_number):
+    """Lógica de rastreamento direta para Cainiao (AliExpress) - Muito mais estável para servidores"""
+    url = f"https://global.cainiao.com/global/detail.json?mailNos={tracking_number}&lang=pt-BR"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7"
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://global.cainiao.com/"
     }
 
     try:
-        # Faz a requisição para a página pública de rastreio
-        response = requests.get(url, headers=headers, timeout=20)
-        html = response.text
-        
-        # O ParcelsApp injeta os dados de rastreio em um script JS na página
-        # Procuramos pelo padrão: window.parcel = {...}
-        match = re.search(r'window\.parcel\s*=\s*({.*?});', html, re.DOTALL)
-        
-        if match:
-            parcel_data = json.loads(match.group(1))
-            states = parcel_data.get("states", [])
-            
+        response = requests.get(url, headers=headers, timeout=15)
+        if response.status_code == 200:
+            data = response.json()
+            module = data.get("module", [])
+            if module:
+                detail = module[0]
+                detail_list = detail.get("detailList", [])
+                if detail_list:
+                    status_text = detail.get("statusDesc") or "Em trânsito (Cainiao)"
+                    eventos = []
+                    for item in detail_list:
+                        data_str = item.get("timeStr") or item.get("time") or ""
+                        descricao = item.get("desc") or ""
+                        if data_str and descricao:
+                            eventos.append({"data": str(data_str), "descricao": str(descricao)})
+                    return {"status": str(status_text), "eventos": eventos}
+    except:
+        pass
+    return None
+
+def get_global_tracking(tracking_number):
+    """Lógica de rastreamento global via API do ParcelsApp (Fallback)"""
+    api_url = "https://parcelsapp.com/api/v2/parcels"
+    payload = {"trackingId": tracking_number, "language": "pt", "country": "Brazil"}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Referer": "https://parcelsapp.com/en/tracking/",
+        "Origin": "https://parcelsapp.com",
+        "X-Requested-With": "XMLHttpRequest"
+    }
+
+    try:
+        response = requests.post(api_url, json=payload, headers=headers, timeout=20)
+        if response.status_code == 200:
+            data = response.json()
+            states = data.get("states", [])
             if states:
-                # Ordena eventos (mais recente primeiro)
                 states = sorted(states, key=lambda x: x.get("date", ""), reverse=True)
                 status_text = states[0].get("status") or "Em trânsito (Global)"
                 eventos = []
-                
                 for state in states:
                     raw_date = state.get("date", "")
-                    # Limpa a data (ex: 2026-04-01T22:33:00Z -> 01/04/2026 22:33)
-                    try:
-                        if "T" in raw_date:
-                            dt = datetime.fromisoformat(raw_date.replace("Z", "+00:00"))
-                            data_str = dt.strftime("%d/%m/%Y %H:%M")
-                        else:
-                            data_str = raw_date
-                    except:
-                        data_str = raw_date
-
+                    data_str = raw_date.replace("T", " ").split(".")[0] if "T" in raw_date else raw_date
                     descricao = state.get("status", "")
                     local = state.get("location", "")
                     if local:
                         descricao = f"{descricao} ({local})"
                     
-                    # Filtro de mensagens técnicas
                     if "parcelsapp.com" not in str(descricao).lower():
                         eventos.append({"data": data_str, "descricao": str(descricao)})
                 
                 if eventos:
                     return {"status": str(status_text), "eventos": eventos}
+    except:
+        pass
 
-    except Exception as e:
-        print(f"Erro no scraping global: {e}")
-
-    # Resposta padrão se nada for encontrado no HTML
     return {
         "status": "Aguardando atualização",
         "eventos": [
@@ -121,23 +133,29 @@ def get_global_tracking(tracking_number):
 
 @app.route("/rastreio/<codigo>")
 def rastrear_unificado(codigo):
-    """ROTA UNIFICADA: Tenta SPX -> Global"""
+    """ROTA UNIFICADA: Tenta SPX -> Cainiao -> Global"""
     # 1. Tenta SPX
     resultado = get_spx_tracking(codigo)
     if resultado: return jsonify(resultado)
     
-    # 2. Tenta Global (Scraping de HTML)
+    # 2. Tenta Cainiao (Muito mais estável para códigos internacionais)
+    resultado = get_cainiao_tracking(codigo)
+    if resultado: return jsonify(resultado)
+    
+    # 3. Tenta ParcelsApp (Global)
     resultado = get_global_tracking(codigo)
     return jsonify(resultado)
 
 @app.route("/rastreio-global/<codigo>")
 def rastrear_global_direto(codigo):
-    resultado = get_global_tracking(codigo)
+    resultado = get_cainiao_tracking(codigo)
+    if not resultado:
+        resultado = get_global_tracking(codigo)
     return jsonify(resultado)
 
 @app.route("/")
 def home():
-    return "API de rastreamento Sermente V13 (Scraping) 🚚"
+    return "API de rastreamento Sermente V14 (Estável) 🚚"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
