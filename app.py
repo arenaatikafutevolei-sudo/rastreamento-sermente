@@ -4,6 +4,8 @@ import requests
 from datetime import datetime
 import os
 import time
+import re
+import json
 
 app = Flask(__name__)
 CORS(app)
@@ -56,55 +58,60 @@ def get_spx_tracking(tracking_number):
         return None
 
 def get_global_tracking(tracking_number):
-    """Lógica de rastreamento global via API alternativa e estável"""
-    # Usando um endpoint de API global que é mais amigável a servidores
-    api_url = "https://parcelsapp.com/api/v2/parcels"
-    payload = {"trackingId": tracking_number, "language": "pt", "country": "Brazil"}
-    
-    # Headers simulando um navegador real de forma mais profunda
+    """Lógica de rastreamento global via Scraping de HTML do ParcelsApp"""
+    url = f"https://parcelsapp.com/pt/tracking/{tracking_number}"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "Referer": "https://parcelsapp.com/pt/tracking",
-        "Origin": "https://parcelsapp.com",
-        "X-Requested-With": "XMLHttpRequest",
-        "sec-ch-ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
-        "sec-ch-ua-mobile": "?0",
-        "sec-ch-ua-platform": '"macOS"'
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7"
     }
 
     try:
-        # Tenta a consulta com um timeout maior para permitir o processamento global
-        response = requests.post(api_url, json=payload, headers=headers, timeout=25)
+        # Faz a requisição para a página pública de rastreio
+        response = requests.get(url, headers=headers, timeout=20)
+        html = response.text
         
-        if response.status_code == 200:
-            data = response.json()
-            states = data.get("states", [])
+        # O ParcelsApp injeta os dados de rastreio em um script JS na página
+        # Procuramos pelo padrão: window.parcel = {...}
+        match = re.search(r'window\.parcel\s*=\s*({.*?});', html, re.DOTALL)
+        
+        if match:
+            parcel_data = json.loads(match.group(1))
+            states = parcel_data.get("states", [])
             
             if states:
+                # Ordena eventos (mais recente primeiro)
                 states = sorted(states, key=lambda x: x.get("date", ""), reverse=True)
                 status_text = states[0].get("status") or "Em trânsito (Global)"
                 eventos = []
+                
                 for state in states:
                     raw_date = state.get("date", "")
-                    data_str = raw_date.replace("T", " ").split(".")[0] if "T" in raw_date else raw_date
+                    # Limpa a data (ex: 2026-04-01T22:33:00Z -> 01/04/2026 22:33)
+                    try:
+                        if "T" in raw_date:
+                            dt = datetime.fromisoformat(raw_date.replace("Z", "+00:00"))
+                            data_str = dt.strftime("%d/%m/%Y %H:%M")
+                        else:
+                            data_str = raw_date
+                    except:
+                        data_str = raw_date
+
                     descricao = state.get("status", "")
                     local = state.get("location", "")
                     if local:
                         descricao = f"{descricao} ({local})"
                     
-                    # Filtro rigoroso de mensagens técnicas
-                    if "parcelsapp.com" not in str(descricao).lower() and "link direto" not in str(descricao).lower():
+                    # Filtro de mensagens técnicas
+                    if "parcelsapp.com" not in str(descricao).lower():
                         eventos.append({"data": data_str, "descricao": str(descricao)})
                 
                 if eventos:
                     return {"status": str(status_text), "eventos": eventos}
 
     except Exception as e:
-        print(f"Erro na consulta global: {e}")
+        print(f"Erro no scraping global: {e}")
 
-    # Resposta padrão se nada for encontrado ou houver erro
+    # Resposta padrão se nada for encontrado no HTML
     return {
         "status": "Aguardando atualização",
         "eventos": [
@@ -119,7 +126,7 @@ def rastrear_unificado(codigo):
     resultado = get_spx_tracking(codigo)
     if resultado: return jsonify(resultado)
     
-    # 2. Tenta Global (ParcelsApp com novos headers)
+    # 2. Tenta Global (Scraping de HTML)
     resultado = get_global_tracking(codigo)
     return jsonify(resultado)
 
@@ -130,7 +137,7 @@ def rastrear_global_direto(codigo):
 
 @app.route("/")
 def home():
-    return "API de rastreamento Sermente V12 (Estável) 🚚"
+    return "API de rastreamento Sermente V13 (Scraping) 🚚"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
