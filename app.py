@@ -44,7 +44,10 @@ TRADUCOES = {
     "Pick up": "Coletado",
     "Processing": "Em processamento",
     "Departed from local sorting center": "Partiu do centro de triagem local",
-    "Arrived at destination hub": "Chegou ao centro de destino"
+    "Arrived at destination hub": "Chegou ao centro de destino",
+    "Object in transit": "Objeto em trânsito",
+    "Object arrived at sorting center": "Objeto chegou ao centro de triagem",
+    "Object departed from sorting center": "Objeto partiu do centro de triagem"
 }
 
 def traduzir_descricao(texto):
@@ -106,62 +109,8 @@ def get_spx_tracking(tracking_number):
     except:
         return None
 
-def get_cainiao_tracking_v2(tracking_number):
-    """Lógica de rastreamento Cainiao com detecção de novo código"""
-    url = f"https://global.cainiao.com/global/detail.json?mailNos={tracking_number}&lang=pt-BR"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/plain, */*",
-        "Referer": "https://global.cainiao.com/"
-    }
-    try:
-        response = requests.get(url, headers=headers, timeout=15)
-        if response.status_code == 200:
-            data = response.json()
-            module = data.get("module", [])
-            if module:
-                detail = module[0]
-                detail_list = detail.get("detailList", [])
-                milestones = detail.get("milestoneList", [])
-                
-                # Tenta detectar novo código de rastreio (ex: NN...BR)
-                novo_codigo = detail.get("destMailNo") or detail.get("trackingNumber")
-                if novo_codigo == tracking_number: novo_codigo = None
-                
-                eventos = []
-                chaves = set()
-                for item in detail_list:
-                    raw_date = item.get("timeStr") or item.get("time") or ""
-                    raw_desc = item.get("desc") or ""
-                    if raw_date and raw_desc:
-                        data_br = formatar_data_br(str(raw_date))
-                        desc_br = traduzir_descricao(str(raw_desc))
-                        chave = f"{data_br}-{desc_br}"
-                        if chave not in chaves:
-                            chaves.add(chave)
-                            eventos.append({"data": data_br, "descricao": desc_br})
-                
-                for ms in milestones:
-                    raw_date = ms.get("timeStr") or ms.get("time") or ""
-                    raw_desc = ms.get("desc") or ms.get("statusDesc") or ""
-                    if raw_date and raw_desc:
-                        data_br = formatar_data_br(str(raw_date))
-                        desc_br = traduzir_descricao(str(raw_desc))
-                        chave = f"{data_br}-{desc_br}"
-                        if chave not in chaves:
-                            chaves.add(chave)
-                            eventos.append({"data": data_br, "descricao": desc_br})
-                
-                if eventos:
-                    eventos.sort(key=lambda x: datetime.strptime(x['data'], "%d/%m/%Y %H:%M") if len(x['data']) > 10 else datetime.strptime(x['data'], "%d/%m/%Y"), reverse=True)
-                    status_text = detail.get("statusDesc") or eventos[0]["descricao"]
-                    return {"status": traduzir_descricao(status_text), "eventos": eventos, "novo_codigo": novo_codigo}
-    except:
-        pass
-    return None
-
 def get_parcelsapp_tracking(tracking_number):
-    """Lógica de rastreamento global via API do ParcelsApp"""
+    """Lógica de rastreamento global via API do ParcelsApp com detecção de novo código"""
     api_url = "https://parcelsapp.com/api/v2/parcels"
     payload = {"trackingId": tracking_number, "language": "pt", "country": "Brazil"}
     headers = {
@@ -178,12 +127,12 @@ def get_parcelsapp_tracking(tracking_number):
             data = response.json()
             states = data.get("states", [])
             
-            # Tenta detectar novo código de rastreio no ParcelsApp
+            # Tenta detectar novo código de rastreio (ex: NN...BR)
             novo_codigo = None
             for attr in data.get("attributes", []):
-                if attr.get("name") == "tracking_number" or attr.get("name") == "destination_tracking_number":
+                if attr.get("name") in ["tracking_number", "destination_tracking_number", "last_tracking_number"]:
                     val = attr.get("val")
-                    if val and val != tracking_number:
+                    if val and val != tracking_number and re.match(r'^[A-Z]{2}[0-9]{9}[A-Z]{2}$', val):
                         novo_codigo = val
                         break
 
@@ -207,16 +156,53 @@ def get_parcelsapp_tracking(tracking_number):
         pass
     return None
 
+def get_cainiao_tracking_v2(tracking_number):
+    """Lógica de rastreamento Cainiao (AliExpress)"""
+    url = f"https://global.cainiao.com/global/detail.json?mailNos={tracking_number}&lang=pt-BR"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://global.cainiao.com/"
+    }
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+        if response.status_code == 200:
+            data = response.json()
+            module = data.get("module", [])
+            if module:
+                detail = module[0]
+                detail_list = detail.get("detailList", [])
+                
+                # Tenta detectar novo código de rastreio
+                novo_codigo = detail.get("destMailNo") or detail.get("trackingNumber")
+                if novo_codigo == tracking_number: novo_codigo = None
+                
+                eventos = []
+                for item in detail_list:
+                    raw_date = item.get("timeStr") or item.get("time") or ""
+                    raw_desc = item.get("desc") or ""
+                    if raw_date and raw_desc:
+                        eventos.append({
+                            "data": formatar_data_br(str(raw_date)),
+                            "descricao": traduzir_descricao(str(raw_desc))
+                        })
+                if eventos:
+                    status_text = detail.get("statusDesc") or eventos[0]["descricao"]
+                    return {"status": traduzir_descricao(status_text), "eventos": eventos, "novo_codigo": novo_codigo}
+    except:
+        pass
+    return None
+
 @app.route("/rastreio/<codigo>")
 def rastrear_unificado(codigo):
-    """ROTA UNIFICADA V22: Suporte a rastreio em cadeia (Auto-Link)"""
+    """ROTA UNIFICADA V23: Prioridade no ParcelsApp para detectar novos códigos"""
     # 1. Tenta SPX primeiro
-    resultado = get_spx_tracking(codigo)
-    if resultado: return jsonify(resultado)
+    resultado_spx = get_spx_tracking(codigo)
+    if resultado_spx: return jsonify(resultado_spx)
     
-    # 2. Tenta Cainiao e ParcelsApp
-    res_cainiao = get_cainiao_tracking_v2(codigo)
+    # 2. Tenta ParcelsApp PRIMEIRO para códigos globais (melhor para detectar NN...BR)
     res_parcels = get_parcelsapp_tracking(codigo)
+    res_cainiao = get_cainiao_tracking_v2(codigo)
     
     if not res_cainiao and not res_parcels:
         return jsonify({
@@ -227,22 +213,19 @@ def rastrear_unificado(codigo):
     # Mesclagem de eventos
     eventos_finais = []
     chaves_unicas = set()
-    todos_eventos = (res_cainiao.get("eventos", []) if res_cainiao else []) + \
-                    (res_parcels.get("eventos", []) if res_parcels else [])
+    todos_eventos = (res_parcels.get("eventos", []) if res_parcels else []) + \
+                    (res_cainiao.get("eventos", []) if res_cainiao else [])
     
-    # Se detectou um novo código (ex: NN...BR), tenta rastrear ele também!
-    novo_codigo = (res_cainiao.get("novo_codigo") if res_cainiao else None) or \
-                  (res_parcels.get("novo_codigo") if res_parcels else None)
+    # Detecção de novo código (Correios)
+    novo_codigo = (res_parcels.get("novo_codigo") if res_parcels else None) or \
+                  (res_cainiao.get("novo_codigo") if res_cainiao else None)
     
+    # Se detectou um novo código (ex: NN...BR), faz o rastreio em cadeia
     if novo_codigo and re.match(r'^[A-Z]{2}[0-9]{9}[A-Z]{2}$', novo_codigo):
-        # Rastreia o novo código (Correios/Local) e adiciona os eventos
         res_novo = get_parcelsapp_tracking(novo_codigo)
         if res_novo:
-            todos_eventos += res_novo.get("eventos", [])
-            if res_novo.get("status"):
-                status_final = res_novo["status"]
-            else:
-                status_final = (res_parcels.get("status") if res_parcels else res_cainiao.get("status"))
+            todos_eventos = res_novo.get("eventos", []) + todos_eventos
+            status_final = res_novo["status"]
         else:
             status_final = (res_parcels.get("status") if res_parcels else res_cainiao.get("status"))
     else:
@@ -271,7 +254,7 @@ def rastrear_global_direto(codigo):
 
 @app.route("/")
 def home():
-    return "API de rastreamento Sermente V22 (Auto-Link) 🚚"
+    return "API de rastreamento Sermente V23 (Deep Link) 🚚"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
