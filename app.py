@@ -4,6 +4,7 @@ import requests
 from datetime import datetime
 import os
 import time
+import re
 import json
 
 app = Flask(__name__)
@@ -51,6 +52,7 @@ def formatar_data_br(data_str):
     if not data_str: return "-"
     data_str = str(data_str)
     try:
+        # Tenta converter de ISO (2026-04-01T22:33:00Z) para BR (01/04/2026 22:33)
         limpo = data_str.replace('T', ' ').split('.')[0].split('+')[0].strip()
         if len(limpo) >= 10:
             if len(limpo) == 10: # Apenas data YYYY-MM-DD
@@ -130,56 +132,54 @@ def get_cainiao_tracking(tracking_number):
         pass
     return None
 
-def get_parcelsapp_tracking(tracking_number):
-    """Lógica de rastreamento global via API do ParcelsApp com headers de navegador real"""
-    api_url = "https://parcelsapp.com/api/v2/parcels"
-    payload = {"trackingId": tracking_number, "language": "pt", "country": "Brazil"}
+def get_parcelsapp_scraping(tracking_number):
+    """Lógica de rastreamento global via Scraping de HTML do ParcelsApp (Mais resistente a bloqueios)"""
+    url = f"https://parcelsapp.com/pt/tracking/{tracking_number}"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "Referer": "https://parcelsapp.com/pt/tracking",
-        "Origin": "https://parcelsapp.com",
-        "X-Requested-With": "XMLHttpRequest",
-        "sec-ch-ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
-        "sec-ch-ua-mobile": "?0",
-        "sec-ch-ua-platform": '"macOS"'
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7"
     }
     try:
-        response = requests.post(api_url, json=payload, headers=headers, timeout=25)
-        if response.status_code == 200:
-            data = response.json()
-            states = data.get("states", [])
+        response = requests.get(url, headers=headers, timeout=20)
+        html = response.text
+        
+        # O ParcelsApp injeta os dados de rastreio em um script JS na página
+        # Procuramos pelo padrão: window.parcel = {...}
+        match = re.search(r'window\.parcel\s*=\s*({.*?});', html, re.DOTALL)
+        
+        if match:
+            parcel_data = json.loads(match.group(1))
+            states = parcel_data.get("states", [])
+            
             if states:
                 states = sorted(states, key=lambda x: x.get("date", ""), reverse=True)
                 status_text = states[0].get("status") or "Em trânsito"
                 eventos = []
                 for state in states:
                     raw_date = state.get("date", "")
-                    data_str = raw_date.replace("T", " ").split(".")[0] if "T" in raw_date else raw_date
                     descricao = state.get("status", "")
                     local = state.get("location", "")
                     if local: descricao = f"{descricao} ({local})"
                     if "parcelsapp.com" not in str(descricao).lower():
                         eventos.append({
-                            "data": formatar_data_br(data_str),
+                            "data": formatar_data_br(raw_date),
                             "descricao": traduzir_descricao(str(descricao))
                         })
                 return {"status": traduzir_descricao(status_text), "eventos": eventos}
-    except:
-        pass
+    except Exception as e:
+        print(f"Erro no scraping: {e}")
     return None
 
 @app.route("/rastreio/<codigo>")
 def rastrear_unificado(codigo):
-    """ROTA UNIFICADA: Tenta SPX -> Mescla Cainiao + ParcelsApp"""
+    """ROTA UNIFICADA: Tenta SPX -> Mescla Cainiao + ParcelsApp (Scraping)"""
     # 1. Tenta SPX primeiro
     resultado_spx = get_spx_tracking(codigo)
     if resultado_spx: return jsonify(resultado_spx)
     
-    # 2. Mescla Cainiao e ParcelsApp
+    # 2. Mescla Cainiao e ParcelsApp (Scraping)
     res_cainiao = get_cainiao_tracking(codigo)
-    res_parcels = get_parcelsapp_tracking(codigo)
+    res_parcels = get_parcelsapp_scraping(codigo)
     
     if not res_cainiao and not res_parcels:
         return jsonify({
@@ -215,8 +215,8 @@ def rastrear_unificado(codigo):
 
 @app.route("/rastreio-global/<codigo>")
 def rastrear_global_direto(codigo):
-    """Rota direta para o ParcelsApp (Global)"""
-    resultado = get_parcelsapp_tracking(codigo)
+    """Rota direta para o ParcelsApp (Scraping)"""
+    resultado = get_parcelsapp_scraping(codigo)
     if not resultado:
         resultado = get_cainiao_tracking(codigo)
     
@@ -229,7 +229,7 @@ def rastrear_global_direto(codigo):
 
 @app.route("/")
 def home():
-    return "API de rastreamento Sermente V17 (Resiliente) 🚚"
+    return "API de rastreamento Sermente V18 (Scraping) 🚚"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
