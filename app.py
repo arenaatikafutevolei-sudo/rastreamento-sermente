@@ -184,7 +184,7 @@ def get_alternative_global_tracking(tracking_number):
 
 @app.route("/rastreio/<codigo>")
 def rastrear_unificado(codigo):
-    """ROTA UNIFICADA V20: Tenta SPX -> Cainiao V2 (Deep Search)"""
+    """ROTA UNIFICADA V21: Tenta SPX -> Cainiao V2 (Deep Search)"""
     # 1. Tenta SPX primeiro
     resultado = get_spx_tracking(codigo)
     if resultado: return jsonify(resultado)
@@ -212,7 +212,7 @@ def rastrear_global_direto(codigo):
 
 @app.route("/")
 def home():
-    return "API de rastreamento Sermente V20 (Deep Search) 🚚"
+    return "API de rastreamento Sermente V21 (Deep Search) 🚚"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
