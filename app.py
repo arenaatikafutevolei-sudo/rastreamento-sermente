@@ -131,19 +131,22 @@ def get_cainiao_tracking(tracking_number):
     return None
 
 def get_parcelsapp_tracking(tracking_number):
-    """Lógica de rastreamento global via API do ParcelsApp"""
+    """Lógica de rastreamento global via API do ParcelsApp com headers de navegador real"""
     api_url = "https://parcelsapp.com/api/v2/parcels"
     payload = {"trackingId": tracking_number, "language": "pt", "country": "Brazil"}
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Content-Type": "application/json",
         "Accept": "application/json",
-        "Referer": "https://parcelsapp.com/en/tracking/",
+        "Referer": "https://parcelsapp.com/pt/tracking",
         "Origin": "https://parcelsapp.com",
-        "X-Requested-With": "XMLHttpRequest"
+        "X-Requested-With": "XMLHttpRequest",
+        "sec-ch-ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"macOS"'
     }
     try:
-        response = requests.post(api_url, json=payload, headers=headers, timeout=20)
+        response = requests.post(api_url, json=payload, headers=headers, timeout=25)
         if response.status_code == 200:
             data = response.json()
             states = data.get("states", [])
@@ -169,12 +172,12 @@ def get_parcelsapp_tracking(tracking_number):
 
 @app.route("/rastreio/<codigo>")
 def rastrear_unificado(codigo):
-    """ROTA UNIFICADA ULTRA: Tenta SPX -> Mescla Cainiao + ParcelsApp"""
-    # 1. Tenta SPX primeiro (é o mais rápido e específico)
+    """ROTA UNIFICADA: Tenta SPX -> Mescla Cainiao + ParcelsApp"""
+    # 1. Tenta SPX primeiro
     resultado_spx = get_spx_tracking(codigo)
     if resultado_spx: return jsonify(resultado_spx)
     
-    # 2. Para outros códigos, mescla Cainiao e ParcelsApp para garantir dados completos
+    # 2. Mescla Cainiao e ParcelsApp
     res_cainiao = get_cainiao_tracking(codigo)
     res_parcels = get_parcelsapp_tracking(codigo)
     
@@ -184,44 +187,49 @@ def rastrear_unificado(codigo):
             "eventos": [{"data": datetime.now().strftime("%d/%m/%Y %H:%M"), "descricao": "A transportadora ainda está processando as informações. Tente novamente em alguns instantes."}]
         })
     
-    # Mesclagem inteligente de eventos
     eventos_finais = []
     chaves_unicas = set()
-    
-    # Adiciona eventos de ambas as fontes
     todos_eventos = (res_cainiao.get("eventos", []) if res_cainiao else []) + \
                     (res_parcels.get("eventos", []) if res_parcels else [])
     
-    # Remove duplicados baseados na descrição e data aproximada
     for ev in todos_eventos:
-        # Chave simplificada para evitar duplicados quase idênticos
-        chave = f"{ev['data'][:10]}-{ev['descricao'][:20]}".lower()
+        # Chave para evitar duplicados
+        chave = f"{ev['data'][:16]}-{ev['descricao'][:30]}".lower()
         if chave not in chaves_unicas:
             chaves_unicas.add(chave)
             eventos_finais.append(ev)
     
     # Ordena por data (mais recente primeiro)
-    # Como a data está em formato BR (DD/MM/AAAA), precisamos converter para ordenar
     try:
         eventos_finais.sort(key=lambda x: datetime.strptime(x['data'], "%d/%m/%Y %H:%M") if len(x['data']) > 10 else datetime.strptime(x['data'], "%d/%m/%Y"), reverse=True)
     except:
-        pass # Mantém a ordem original se falhar
+        pass
 
-    # Define o status final (pega o mais recente das fontes)
     status_final = "Em trânsito"
     if res_parcels and res_parcels.get("status"):
         status_final = res_parcels["status"]
     elif res_cainiao and res_cainiao.get("status"):
         status_final = res_cainiao["status"]
 
-    return jsonify({
-        "status": status_final,
-        "eventos": eventos_finais
-    })
+    return jsonify({"status": status_final, "eventos": eventos_finais})
+
+@app.route("/rastreio-global/<codigo>")
+def rastrear_global_direto(codigo):
+    """Rota direta para o ParcelsApp (Global)"""
+    resultado = get_parcelsapp_tracking(codigo)
+    if not resultado:
+        resultado = get_cainiao_tracking(codigo)
+    
+    if not resultado:
+        return jsonify({
+            "status": "Não encontrado",
+            "eventos": [{"data": "-", "descricao": "Nenhuma informação encontrada para este código global."}]
+        })
+    return jsonify(resultado)
 
 @app.route("/")
 def home():
-    return "API de rastreamento Sermente V16 (Ultra Unificada) 🚚"
+    return "API de rastreamento Sermente V17 (Resiliente) 🚚"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
