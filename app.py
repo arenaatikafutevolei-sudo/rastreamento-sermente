@@ -10,7 +10,7 @@ import re
 app = Flask(__name__)
 CORS(app)
 
-# Dicionário de tradução expandido para cobrir eventos nacionais e internacionais
+# Dicionário de tradução expandido
 TRADUCOES = {
     "Leave the warehouse": "Saiu do armazém",
     "Package finished": "Pacote processado e finalizado",
@@ -66,7 +66,6 @@ def formatar_data_br(data_str):
     if not data_str: return "-"
     data_str = str(data_str)
     try:
-        # Tenta diversos formatos comuns de API
         limpo = data_str.replace('T', ' ').split('.')[0].split('+')[0].strip()
         if len(limpo) >= 10:
             if len(limpo) == 10:
@@ -115,8 +114,7 @@ def get_spx_tracking(tracking_number):
         return None
 
 def get_correios_tracking(tracking_number):
-    """Lógica de rastreamento direta para códigos brasileiros (Correios) via API alternativa"""
-    # Usando um endpoint de rastreio público que costuma ser mais estável para códigos BR
+    """Lógica de rastreamento direta para códigos brasileiros (Correios)"""
     url = f"https://api.linketrack.com/track/json?user=teste&token=1abcd1234567890&codigo={tracking_number}"
     try:
         response = requests.get(url, timeout=15)
@@ -139,7 +137,7 @@ def get_correios_tracking(tracking_number):
     return None
 
 def get_cainiao_tracking_v2(tracking_number):
-    """Lógica de rastreamento Cainiao com busca profunda"""
+    """Lógica de rastreamento Cainiao com varredura de texto para novo código"""
     url = f"https://global.cainiao.com/global/detail.json?mailNos={tracking_number}&lang=pt-BR"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -149,16 +147,20 @@ def get_cainiao_tracking_v2(tracking_number):
     try:
         response = requests.get(url, headers=headers, timeout=15)
         if response.status_code == 200:
+            data_text = response.text
             data = response.json()
+            
+            # Varredura de texto (Regex Scan) para encontrar códigos brasileiros (ex: NN135003362BR)
+            # Procuramos por qualquer padrão de 2 letras + 9 números + BR
+            match_br = re.search(r'[A-Z]{2}[0-9]{9}BR', data_text)
+            novo_codigo = match_br.group(0) if match_br else None
+            if novo_codigo == tracking_number: novo_codigo = None
+            
             module = data.get("module", [])
             if module:
                 detail = module[0]
                 detail_list = detail.get("detailList", [])
                 milestones = detail.get("milestoneList", [])
-                
-                # Tenta detectar novo código de rastreio (ex: NN...BR)
-                novo_codigo = detail.get("destMailNo") or detail.get("trackingNumber")
-                if novo_codigo == tracking_number: novo_codigo = None
                 
                 eventos = []
                 chaves = set()
@@ -194,7 +196,7 @@ def get_cainiao_tracking_v2(tracking_number):
 
 @app.route("/rastreio/<codigo>")
 def rastrear_unificado(codigo):
-    """ROTA UNIFICADA V25: Tenta SPX -> Correios (se BR) -> Cainiao V2"""
+    """ROTA UNIFICADA V26: Tenta SPX -> Correios (se BR) -> Cainiao V2 (com Regex Scan)"""
     # 1. Tenta SPX primeiro
     resultado = get_spx_tracking(codigo)
     if resultado: return jsonify(resultado)
@@ -204,17 +206,16 @@ def rastrear_unificado(codigo):
         resultado_br = get_correios_tracking(codigo)
         if resultado_br: return jsonify(resultado_br)
     
-    # 3. Tenta Cainiao com busca profunda
+    # 3. Tenta Cainiao com varredura de texto para novo código
     resultado_cainiao = get_cainiao_tracking_v2(codigo)
     if resultado_cainiao:
-        # Se a Cainiao informar um novo código BR, tenta rastrear ele também!
         novo_codigo = resultado_cainiao.get("novo_codigo")
+        # Se detectou um novo código BR no meio do texto da Cainiao, rastreia ele também!
         if novo_codigo and str(novo_codigo).upper().endswith("BR"):
             resultado_br = get_correios_tracking(novo_codigo)
             if resultado_br:
                 # Mescla os eventos da Cainiao com os dos Correios
                 eventos_finais = resultado_br["eventos"] + resultado_cainiao["eventos"]
-                # Remove duplicados e ordena
                 chaves = set()
                 final = []
                 for ev in eventos_finais:
@@ -225,7 +226,7 @@ def rastrear_unificado(codigo):
                 try:
                     final.sort(key=lambda x: datetime.strptime(x['data'], "%d/%m/%Y %H:%M") if len(x['data']) > 10 else datetime.strptime(x['data'], "%d/%m/%Y"), reverse=True)
                 except: pass
-                return jsonify({"status": resultado_br["status"], "eventos": final})
+                return jsonify({"status": resultado_br["status"], "eventos": final, "novo_codigo": novo_codigo})
         
         return jsonify(resultado_cainiao)
     
@@ -248,7 +249,7 @@ def rastrear_global_direto(codigo):
 
 @app.route("/")
 def home():
-    return "API de rastreamento Sermente V25 (Correios Direto) 🚚"
+    return "API de rastreamento Sermente V26 (Regex Scan) 🚚"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
