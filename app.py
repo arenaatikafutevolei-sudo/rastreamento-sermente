@@ -183,14 +183,63 @@ def get_cainiao_tracking_v2(tracking_number):
     return None
 
 def get_loggi_tracking(tracking_code):
-    """Lógica de rastreamento para Loggi via Linketrack (Proxy para contornar bloqueio de IP)"""
-    # Linketrack suporta transportadoras nacionais e não sofre bloqueio de IP do Railway
-    url = f"https://api.linketrack.com/track/json?user=teste&token=1abcd1234567890&codigo={tracking_code}"
+    """
+    Lógica de rastreamento para Loggi.
+    Tenta primeiro a API pública da Loggi com headers de navegador.
+    Se falhar, tenta o Linketrack (que o usuário já usa).
+    """
+    tracking_code = str(tracking_code).strip().upper()
+    
+    # 1. Tentativa via API Pública da Loggi (Acesso Direto)
     try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        response = requests.get(url, headers=headers, timeout=15)
-        if response.status_code == 200:
-            data = response.json()
+        url_api = f"https://www.loggi.com/rastreador/api/v1/packages/{tracking_code}/"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json",
+            "Referer": f"https://www.loggi.com/rastreador/{tracking_code}",
+            "X-Requested-With": "XMLHttpRequest"
+        }
+        res_api = requests.get(url_api, headers=headers, timeout=10)
+        
+        if res_api.status_code == 200:
+            data = res_api.json()
+            status_raw = data.get("status", "Em trânsito")
+            
+            # Mapeamento de status amigáveis
+            status_map = {
+                "CHECKED_IN": "Preparando para transferência",
+                "OUT_FOR_DELIVERY": "Saiu para entrega",
+                "DELIVERED": "Entregue",
+                "STOCKED": "Recebido na unidade",
+                "PICKED_UP": "Coletado",
+                "PENDING": "Pedido criado"
+            }
+            status = status_map.get(status_raw, status_raw)
+            
+            history = data.get("tracking_history", [])
+            eventos = []
+            for h in history:
+                data_evento = formatar_data_br(h.get("date"))
+                desc = h.get("status_text") or h.get("status")
+                if data_evento and desc:
+                    eventos.append({"data": data_evento, "descricao": str(desc)})
+            
+            # Se não houver histórico mas houver status atual
+            if not eventos:
+                eventos.append({
+                    "data": datetime.now().strftime("%d/%m/%Y %H:%M"),
+                    "descricao": status
+                })
+            
+            return {"status": status, "eventos": eventos}
+    except: pass
+
+    # 2. Fallback: Linketrack (Proxy para contornar bloqueio de IP)
+    try:
+        url_link = f"https://api.linketrack.com/track/json?user=teste&token=1abcd1234567890&codigo={tracking_code}"
+        res_link = requests.get(url_link, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+        if res_link.status_code == 200:
+            data = res_link.json()
             eventos_raw = data.get("eventos", [])
             if eventos_raw:
                 eventos = []
@@ -201,44 +250,8 @@ def get_loggi_tracking(tracking_code):
                     eventos.append({"data": data_br, "descricao": f"{desc} ({local})" if local else desc})
                 return {"status": eventos[0]["descricao"], "eventos": eventos}
     except: pass
-
-    # Fallback: API Direta da Loggi (Caso o Linketrack falhe)
-    try:
-        url_api = f"https://www.loggi.com/rastreador/api/v1/packages/{tracking_code}/"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "application/json",
-            "Referer": f"https://www.loggi.com/rastreador/{tracking_code}"
-        }
-        res_api = requests.get(url_api, headers=headers, timeout=10)
-        if res_api.status_code == 200:
-            data = res_api.json()
-            status = data.get("status", "Em trânsito")
-            # Tradução de status Loggi
-            status_map = {"CHECKED_IN": "Preparando para transferência", "OUT_FOR_DELIVERY": "Saiu para entrega", "DELIVERED": "Entregue"}
-            status = status_map.get(status, status)
-            history = data.get("tracking_history", [])
-            eventos = []
-            for h in history:
-                eventos.append({"data": formatar_data_br(h.get("date")), "descricao": str(h.get("status_text") or h.get("status"))})
-            if not eventos: eventos.append({"data": datetime.now().strftime("%d/%m/%Y %H:%M"), "descricao": status})
-            return {"status": status, "eventos": eventos}
-    except: pass
     
     return None
-
-# ---------------------------------------------------------------------------
-# Detecção de códigos Loggi
-# Padrões conhecidos:
-#   - Termina com "LG"  → ex: NE0A37B35CE47CBBLG, NE9CA5F77BCAC207LG
-#   - Começa com "MR"   → ex: MRGIHQV7
-# ---------------------------------------------------------------------------
-def is_loggi_code(codigo):
-    if codigo.endswith("LG"):
-        return True
-    if codigo.startswith("MR") and len(codigo) >= 6:
-        return True
-    return False
 
 def logic_unificada(codigo):
     codigo = str(codigo).strip().upper()
@@ -247,40 +260,25 @@ def logic_unificada(codigo):
     res_spx = get_spx_tracking(codigo)
     if res_spx: return res_spx
 
-    # 2. Loggi — Solução provisória: identifica o código e redireciona para o site da Loggi
-    #    Quando a integração direta estiver pronta, basta remover este bloco.
-    if is_loggi_code(codigo):
-        return {
-            "status": "CODIGO DA LOGGI, CONSULTE CLICANDO NO BOTAO ABAIXO",
-            "loggi_redirect": True,
-            "loggi_url": f"https://www.loggi.com/rastreador/{codigo}",
-            "eventos": [
-                {
-                    "data": datetime.now().strftime("%d/%m/%Y %H:%M"),
-                    "descricao": "Código identificado como Loggi. Clique no botão abaixo para rastrear diretamente no site da Loggi."
-                }
-            ],
-            "codigo_original": codigo
-        }
-
-    # 3. Loggi via API (fallback para prefixos NE/MR sem sufixo LG e códigos longos)
-    if codigo.startswith("NE") or codigo.startswith("MR") or len(codigo) > 15:
+    # 2. Loggi (Identificação por Padrão)
+    # Padrões: NE...LG, MR..., ou códigos que terminam em LG
+    if codigo.startswith("NE") or codigo.startswith("MR") or codigo.endswith("LG"):
         res_loggi = get_loggi_tracking(codigo)
         if res_loggi: return res_loggi
     
-    # 4. Correios Direto
+    # 3. Correios Direto
     if codigo.endswith("BR") and len(codigo) == 13:
         res_br = get_correios_tracking(codigo)
         if res_br: return res_br
     
-    # 5. Cainiao (Internacional)
+    # 4. Cainiao (Internacional)
     res_cainiao = get_cainiao_tracking_v2(codigo)
     if res_cainiao:
         novo_codigo = res_cainiao.get("novo_codigo")
         eventos_finais = res_cainiao.get("eventos", [])
         status_final = res_cainiao.get("status")
         
-        # 6. Chain Tracking
+        # 5. Chain Tracking (Cainiao -> Correios)
         if novo_codigo and re.match(r'^[A-Z]{2}[0-9]{9}BR$', novo_codigo):
             res_novo_br = get_correios_tracking(novo_codigo)
             if res_novo_br:
@@ -303,7 +301,7 @@ def logic_unificada(codigo):
 
         return {"status": status_final, "eventos": final, "codigo_original": codigo, "novo_codigo": novo_codigo}
 
-    # Fallback Final para Loggi
+    # Fallback Final para Loggi (Caso não tenha batido no padrão inicial)
     res_loggi_final = get_loggi_tracking(codigo)
     if res_loggi_final: return res_loggi_final
 
@@ -323,7 +321,7 @@ def rastrear_global(codigo):
 
 @app.route("/")
 def home():
-    return "API de rastreamento Sermente V43 (Loggi Provisório) 🚚"
+    return "API de rastreamento Sermente V44 (Loggi Integrada) 🚚"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
