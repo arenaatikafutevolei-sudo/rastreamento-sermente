@@ -184,22 +184,23 @@ def get_cainiao_tracking_v2(tracking_number):
 
 def get_loggi_tracking(tracking_code):
     """
-    Lógica de rastreamento para Loggi.
-    Tenta primeiro a API pública da Loggi com headers de navegador.
-    Se falhar, tenta o Linketrack (que o usuário já usa).
+    Lógica de rastreamento para Loggi melhorada (V45).
+    Tenta primeiro a API pública da Loggi com headers de navegador mobile.
+    Se falhar, tenta o Linketrack.
     """
     tracking_code = str(tracking_code).strip().upper()
     
-    # 1. Tentativa via API Pública da Loggi (Acesso Direto)
+    # 1. Tentativa via API Pública da Loggi (Headers Mobile para evitar Cloudflare)
     try:
         url_api = f"https://www.loggi.com/rastreador/api/v1/packages/{tracking_code}/"
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
             "Referer": f"https://www.loggi.com/rastreador/{tracking_code}",
-            "X-Requested-With": "XMLHttpRequest"
+            "X-Requested-With": "XMLHttpRequest",
+            "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7"
         }
-        res_api = requests.get(url_api, headers=headers, timeout=10)
+        res_api = requests.get(url_api, headers=headers, timeout=12)
         
         if res_api.status_code == 200:
             data = res_api.json()
@@ -212,7 +213,8 @@ def get_loggi_tracking(tracking_code):
                 "DELIVERED": "Entregue",
                 "STOCKED": "Recebido na unidade",
                 "PICKED_UP": "Coletado",
-                "PENDING": "Pedido criado"
+                "PENDING": "Pedido criado",
+                "CANCELED": "Cancelado"
             }
             status = status_map.get(status_raw, status_raw)
             
@@ -224,8 +226,12 @@ def get_loggi_tracking(tracking_code):
                 if data_evento and desc:
                     eventos.append({"data": data_evento, "descricao": str(desc)})
             
-            # Se não houver histórico mas houver status atual
-            if not eventos:
+            # Ordenar eventos por data decrescente
+            if eventos:
+                try:
+                    eventos.sort(key=lambda x: datetime.strptime(x['data'], "%d/%m/%Y %H:%M") if len(x['data']) > 10 else datetime.strptime(x['data'], "%d/%m/%Y"), reverse=True)
+                except: pass
+            else:
                 eventos.append({
                     "data": datetime.now().strftime("%d/%m/%Y %H:%M"),
                     "descricao": status
@@ -234,7 +240,7 @@ def get_loggi_tracking(tracking_code):
             return {"status": status, "eventos": eventos}
     except: pass
 
-    # 2. Fallback: Linketrack (Proxy para contornar bloqueio de IP)
+    # 2. Fallback: Linketrack (Proxy)
     try:
         url_link = f"https://api.linketrack.com/track/json?user=teste&token=1abcd1234567890&codigo={tracking_code}"
         res_link = requests.get(url_link, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
@@ -321,7 +327,7 @@ def rastrear_global(codigo):
 
 @app.route("/")
 def home():
-    return "API de rastreamento Sermente V44 (Loggi Integrada) 🚚"
+    return "API de rastreamento Sermente V45 (Loggi Fixed) 🚚"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
