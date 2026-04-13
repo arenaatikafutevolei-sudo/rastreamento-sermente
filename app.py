@@ -10,7 +10,7 @@ import re
 app = Flask(__name__)
 CORS(app)
 
-# Dicionário de tradução expandido
+# Dicionário de tradução para eventos internacionais (Cainiao/AliExpress)
 TRADUCOES = {
     "Leave the warehouse": "Saiu do armazém",
     "Package finished": "Pacote processado e finalizado",
@@ -112,11 +112,9 @@ def get_spx_tracking(tracking_number):
         return None
 
 def get_correios_tracking(tracking_number):
-    """Lógica robusta para Correios com fallback"""
-    # Endpoint 1: Linketrack
-    url1 = f"https://api.linketrack.com/track/json?user=teste&token=1abcd1234567890&codigo={tracking_number}"
+    url = f"https://api.linketrack.com/track/json?user=teste&token=1abcd1234567890&codigo={tracking_number}"
     try:
-        response = requests.get(url1, timeout=10)
+        response = requests.get(url, timeout=10)
         if response.status_code == 200:
             data = response.json()
             eventos_raw = data.get("eventos", [])
@@ -129,25 +127,6 @@ def get_correios_tracking(tracking_number):
                     eventos.append({"data": data_br, "descricao": f"{desc} ({local})"})
                 return {"status": eventos[0]["descricao"], "eventos": eventos}
     except: pass
-
-    # Endpoint 2: Proxy Alternativo (Caso o primeiro falhe)
-    url2 = f"https://api.rastreie.com/track/{tracking_number}"
-    try:
-        response = requests.get(url2, timeout=10)
-        if response.status_code == 200:
-            data = response.json()
-            # Ajustar conforme o formato da resposta dessa API (exemplo genérico)
-            eventos_raw = data.get("events", [])
-            if eventos_raw:
-                eventos = []
-                for ev in eventos_raw:
-                    eventos.append({
-                        "data": formatar_data_br(ev.get("date")),
-                        "descricao": f"{ev.get('status')} ({ev.get('location')})"
-                    })
-                return {"status": eventos[0]["descricao"], "eventos": eventos}
-    except: pass
-
     return None
 
 def get_cainiao_tracking_v2(tracking_number):
@@ -175,13 +154,16 @@ def get_cainiao_tracking_v2(tracking_number):
                 eventos = []
                 for item in detail_list:
                     raw_date = item.get("timeStr") or item.get("time") or ""
-                    raw_desc = item.get("desc") or ""
+                    # PRIORIDADE DE DESCRIÇÃO: 'standerdDesc' costuma ter a tradução PT-BR correta da Cainiao
+                    raw_desc = item.get("standerdDesc") or item.get("desc") or item.get("descTitle") or ""
+                    
                     if raw_date and raw_desc:
                         eventos.append({
                             "data": formatar_data_br(str(raw_date)),
                             "descricao": traduzir_descricao(str(raw_desc))
                         })
                 
+                # Fallback: Se não houver eventos, mas houver status atual
                 if not eventos and detail.get("latestEvent"):
                     eventos.append({
                         "data": formatar_data_br(detail.get("latestEventTimeStr")),
@@ -251,7 +233,7 @@ def rastrear_global(codigo):
 
 @app.route("/")
 def home():
-    return "API de rastreamento Sermente V31 (Chain Master Pro) 🚚"
+    return "API de rastreamento Sermente V32 (Deep Trace) 🚚"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
