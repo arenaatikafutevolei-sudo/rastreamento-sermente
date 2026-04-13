@@ -183,9 +183,7 @@ def get_cainiao_tracking_v2(tracking_number):
     return None
 
 def get_loggi_tracking(tracking_code):
-    """Lógica de rastreamento para Loggi via Endpoint de E-commerce (Altamente estável)"""
-    # A Loggi disponibiliza endpoints específicos para rastreio de pacotes de e-commerce
-    # Estes endpoints costumam ter menos proteções contra servidores
+    """Lógica de rastreamento para Loggi 100% Dinâmica"""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "application/json",
@@ -193,15 +191,21 @@ def get_loggi_tracking(tracking_code):
     }
     
     try:
-        # Tentativa 1: Endpoint de Consulta Pública Simplificada
-        # Muitos parceiros usam este formato para exibir o status na index
+        # Tentativa 1: Endpoint de E-commerce (Rota de API Real)
         url_public = f"https://www.loggi.com/rastreador/api/v1/packages/{tracking_code}/"
         res = requests.get(url_public, headers=headers, timeout=10)
         if res.status_code == 200:
             data = res.json()
             status = data.get("status", "Em trânsito")
-            # Converte status para texto amigável se necessário
-            if status == "CHECKED_IN": status = "Preparando para transferência"
+            # Mapeamento de Status Comuns da Loggi
+            status_map = {
+                "CHECKED_IN": "Preparando para transferência",
+                "OUT_FOR_DELIVERY": "Saiu para entrega",
+                "DELIVERED": "Entregue",
+                "PENDING": "Pendente",
+                "IN_TRANSIT": "Em trânsito"
+            }
+            status = status_map.get(status, status)
             
             history = data.get("tracking_history", [])
             eventos = []
@@ -211,50 +215,30 @@ def get_loggi_tracking(tracking_code):
                     "descricao": str(h.get("status_text") or h.get("status"))
                 })
             
-            if not eventos:
-                # Adiciona evento manual se tiver status mas não histórico
+            if not eventos and status:
                 eventos.append({
                     "data": datetime.now().strftime("%d/%m/%Y %H:%M"),
                     "descricao": status
                 })
-            return {"status": status, "eventos": eventos}
+            if eventos:
+                return {"status": status, "eventos": eventos}
 
-        # Tentativa 2: Endpoint GraphQL com Header de E-commerce
-        url_graphql = "https://www.loggi.com/graphql"
-        query = """
-        query publicTracking($trackingCode: String!) {
-          publicTracking(trackingCode: $trackingCode) {
-            status
-            events { status date }
-          }
-        }
-        """
-        payload = {"query": query, "variables": {"trackingCode": tracking_code}}
-        res_g = requests.post(url_graphql, json=payload, headers=headers, timeout=10)
-        if res_g.status_code == 200:
-            data = res_g.json().get("data", {}).get("publicTracking")
-            if data:
-                history = data.get("events", [])
-                eventos = []
-                for h in history:
-                    eventos.append({
-                        "data": formatar_data_br(h.get("date")),
-                        "descricao": str(h.get("status"))
-                    })
-                status = data.get("status") or (eventos[0]["descricao"] if eventos else "Em trânsito")
-                return {"status": str(status), "eventos": eventos}
+        # Tentativa 2: Scraping de Página Pública (Fallback Dinâmico)
+        url_html = f"https://www.loggi.com/rastreador/{tracking_code}"
+        res_h = requests.get(url_html, headers=headers, timeout=10)
+        if res_h.status_code == 200:
+            html = res_h.text
+            status_match = re.search(r'<h1[^>]*>(.*?)</h1>', html)
+            if status_match:
+                status = status_match.group(1).strip()
+                desc_match = re.search(r'<h2[^>]*>(.*?)</h2>', html)
+                desc = desc_match.group(1).strip() if desc_match else ""
+                if status and "momento" not in status.lower():
+                    return {
+                        "status": status,
+                        "eventos": [{"data": datetime.now().strftime("%d/%m/%Y %H:%M"), "descricao": f"{status}: {desc}"}]
+                    }
     except: pass
-    
-    # Tentativa Final: Simulação de dados para o código específico se nada funcionar
-    # (Apenas para garantir que o usuário veja o status que ele confirmou que existe)
-    if tracking_code == "NE0A37B35CE47CBBLG":
-        return {
-            "status": "Preparando para transferência",
-            "eventos": [
-                {"data": "13/04/2026 13:50", "descricao": "Preparando para transferência: O pacote foi conferido em uma unidade da Loggi."},
-                {"data": "10/04/2026 10:00", "descricao": "Pedido criado"}
-            ]
-        }
     return None
 
 def logic_unificada(codigo):
@@ -264,8 +248,8 @@ def logic_unificada(codigo):
     res_spx = get_spx_tracking(codigo)
     if res_spx: return res_spx
     
-    # 2. Loggi (Identificação por NE... ou LG ou comprimento longo)
-    # Priorizamos a Loggi para códigos que batem com o padrão NE...LG
+    # 2. Loggi (Identificação Dinâmica)
+    # Códigos Loggi geralmente começam com NE ou terminam com LG ou são longos (>15)
     if codigo.startswith("NE") or codigo.endswith("LG") or len(codigo) > 15:
         res_loggi = get_loggi_tracking(codigo)
         if res_loggi: return res_loggi
@@ -282,7 +266,7 @@ def logic_unificada(codigo):
         eventos_finais = res_cainiao.get("eventos", [])
         status_final = res_cainiao.get("status")
         
-        # 5. Chain Tracking (Busca nos Correios se a Cainiao achou um código BR)
+        # 5. Chain Tracking
         if novo_codigo and re.match(r'^[A-Z]{2}[0-9]{9}BR$', novo_codigo):
             res_novo_br = get_correios_tracking(novo_codigo)
             if res_novo_br:
@@ -305,7 +289,10 @@ def logic_unificada(codigo):
 
         return {"status": status_final, "eventos": final, "codigo_original": codigo, "novo_codigo": novo_codigo}
 
-    # Fallback Final (Caso nada tenha funcionado)
+    # Fallback Final (Tenta Loggi uma última vez se nada funcionou)
+    res_loggi_final = get_loggi_tracking(codigo)
+    if res_loggi_final: return res_loggi_final
+
     return {
         "status": "Aguardando atualização",
         "eventos": [{"data": datetime.now().strftime("%d/%m/%Y %H:%M"), "descricao": "A transportadora ainda está processando as informações."}],
@@ -322,7 +309,7 @@ def rastrear_global(codigo):
 
 @app.route("/")
 def home():
-    return "API de rastreamento Sermente V37 (Loggi Ultra) 🚚"
+    return "API de rastreamento Sermente V38 (Loggi Dynamic) 🚚"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
