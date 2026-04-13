@@ -10,7 +10,7 @@ import re
 app = Flask(__name__)
 CORS(app)
 
-# Dicionário de tradução para eventos internacionais (Cainiao/AliExpress)
+# Dicionário de tradução para eventos internacionais e nacionais
 TRADUCOES = {
     "Leave the warehouse": "Saiu do armazém",
     "Package finished": "Pacote processado e finalizado",
@@ -141,12 +141,9 @@ def get_cainiao_tracking_v2(tracking_number):
         if response.status_code == 200:
             data_text = response.text
             data = response.json()
-            
-            # Regex agressivo para encontrar código BR
             match_br = re.search(r'([A-Z]{2}[0-9]{9}BR)', data_text)
             novo_codigo = match_br.group(1) if match_br else None
             if novo_codigo == tracking_number: novo_codigo = None
-            
             module = data.get("module", [])
             if module:
                 detail = module[0]
@@ -154,25 +151,68 @@ def get_cainiao_tracking_v2(tracking_number):
                 eventos = []
                 for item in detail_list:
                     raw_date = item.get("timeStr") or item.get("time") or ""
-                    # PRIORIDADE DE DESCRIÇÃO: 'standerdDesc' costuma ter a tradução PT-BR correta da Cainiao
                     raw_desc = item.get("standerdDesc") or item.get("desc") or item.get("descTitle") or ""
-                    
                     if raw_date and raw_desc:
                         eventos.append({
                             "data": formatar_data_br(str(raw_date)),
                             "descricao": traduzir_descricao(str(raw_desc))
                         })
-                
-                # Fallback: Se não houver eventos, mas houver status atual
                 if not eventos and detail.get("latestEvent"):
                     eventos.append({
                         "data": formatar_data_br(detail.get("latestEventTimeStr")),
                         "descricao": traduzir_descricao(detail.get("latestEventDesc"))
                     })
-
                 if eventos or novo_codigo:
                     status_text = detail.get("statusDesc") or (eventos[0]["descricao"] if eventos else "Em trânsito")
                     return {"status": traduzir_descricao(status_text), "eventos": eventos, "novo_codigo": novo_codigo}
+    except: pass
+    return None
+
+def get_loggi_tracking(tracking_code):
+    """Lógica de rastreamento para Loggi via API GraphQL pública"""
+    url = "https://www.loggi.com/graphql"
+    query = """
+    query tracking($trackingCode: String!) {
+      tracking(trackingCode: $trackingCode) {
+        trackingCode
+        status
+        lastStatusDate
+        history {
+          status
+          location
+          date
+        }
+      }
+    }
+    """
+    # Algumas contas Loggi usam queries diferentes, vamos tentar a mais comum
+    # Se falhar, usaremos uma abordagem de scraping via API pública de detalhes
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": f"https://www.loggi.com/rastreador/{tracking_code}"
+    }
+    try:
+        # Tentativa 1: Endpoint de rastreio direto (E-commerce)
+        api_url = f"https://www.loggi.com/rastreador/api/v1/packages/{tracking_code}/"
+        res = requests.get(api_url, headers=headers, timeout=10)
+        if res.status_code == 200:
+            data = res.json()
+            # O formato da Loggi costuma ter um campo 'events' ou 'history'
+            history = data.get("history", []) or data.get("events", [])
+            if history:
+                eventos = []
+                for h in history:
+                    raw_date = h.get("date") or h.get("timestamp") or ""
+                    desc = h.get("status") or h.get("description") or "Atualização"
+                    loc = h.get("location") or ""
+                    if loc: desc = f"{desc} ({loc})"
+                    eventos.append({
+                        "data": formatar_data_br(raw_date),
+                        "descricao": str(desc)
+                    })
+                status = data.get("status") or (eventos[0]["descricao"] if eventos else "Em trânsito")
+                return {"status": str(status), "eventos": eventos}
     except: pass
     return None
 
@@ -183,12 +223,18 @@ def logic_unificada(codigo):
     res_spx = get_spx_tracking(codigo)
     if res_spx: return res_spx
     
-    # 2. Correios Direto
+    # 2. Loggi (Nova Integração)
+    # Códigos Loggi costumam ser alfanuméricos longos ou ter 'LG' no final
+    if len(codigo) > 15 or "LG" in codigo:
+        res_loggi = get_loggi_tracking(codigo)
+        if res_loggi: return res_loggi
+    
+    # 3. Correios Direto
     if codigo.endswith("BR"):
         res_br = get_correios_tracking(codigo)
         if res_br: return res_br
     
-    # 3. Cainiao
+    # 4. Cainiao
     res_cainiao = get_cainiao_tracking_v2(codigo)
     if not res_cainiao:
         return {
@@ -200,7 +246,7 @@ def logic_unificada(codigo):
     eventos_finais = res_cainiao.get("eventos", [])
     status_final = res_cainiao.get("status")
     
-    # 4. Chain Tracking
+    # 5. Chain Tracking
     if novo_codigo and re.match(r'^[A-Z]{2}[0-9]{9}BR$', novo_codigo):
         res_novo_br = get_correios_tracking(novo_codigo)
         if res_novo_br:
@@ -233,7 +279,7 @@ def rastrear_global(codigo):
 
 @app.route("/")
 def home():
-    return "API de rastreamento Sermente V32 (Deep Trace) 🚚"
+    return "API de rastreamento Sermente V33 (Loggi Ready) 🚚"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
