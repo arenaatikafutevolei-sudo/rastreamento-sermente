@@ -167,13 +167,22 @@ def get_cainiao_tracking_v2(tracking_number):
                 for item in detail_list:
                     raw_date = item.get("timeStr") or item.get("time") or ""
                     raw_desc = item.get("desc") or ""
+                    # Tradução e limpeza da descrição
                     if raw_date and raw_desc:
                         eventos.append({
                             "data": formatar_data_br(str(raw_date)),
                             "descricao": traduzir_descricao(str(raw_desc))
                         })
-                if eventos:
-                    status_text = detail.get("statusDesc") or eventos[0]["descricao"]
+                
+                # Se não houver eventos na lista estruturada, tenta buscar eventos brutos se existirem
+                if not eventos and detail.get("latestEvent"):
+                    eventos.append({
+                        "data": formatar_data_br(detail.get("latestEventTimeStr")),
+                        "descricao": traduzir_descricao(detail.get("latestEventDesc"))
+                    })
+
+                if eventos or novo_codigo:
+                    status_text = detail.get("statusDesc") or (eventos[0]["descricao"] if eventos else "Em trânsito")
                     return {"status": traduzir_descricao(status_text), "eventos": eventos, "novo_codigo": novo_codigo}
     except:
         pass
@@ -181,7 +190,7 @@ def get_cainiao_tracking_v2(tracking_number):
 
 @app.route("/rastreio/<codigo>")
 def rastrear_unificado(codigo):
-    """ROTA UNIFICADA V29: Cainiao + Correios (Sem ParcelsApp)"""
+    """ROTA UNIFICADA V30: Cainiao + Correios (Chain Master)"""
     codigo = str(codigo).strip().upper()
     
     # 1. Tenta SPX primeiro (Prioridade 100%)
@@ -212,6 +221,7 @@ def rastrear_unificado(codigo):
         res_novo_br = get_correios_tracking(novo_codigo)
         if res_novo_br:
             # Mescla os eventos dos Correios (mais recentes) com os da Cainiao
+            # Os eventos dos Correios vêm primeiro (topo da lista)
             eventos_finais = res_novo_br.get("eventos", []) + eventos_finais
             status_final = res_novo_br["status"]
 
@@ -220,21 +230,29 @@ def rastrear_unificado(codigo):
     final = []
     for ev in eventos_finais:
         # Chave baseada em data (minutos) e início da descrição para evitar duplicidade de APIs diferentes
-        chave = f"{ev['data'][:16]}-{ev['descricao'][:20]}".lower()
+        # Normalizamos a descrição para evitar duplicatas por espaços ou pontuação
+        desc_limpa = re.sub(r'[^\w\s]', '', ev['descricao'][:30]).strip().lower()
+        chave = f"{ev['data'][:16]}-{desc_limpa}"
         if chave not in chaves_unicas:
             chaves_unicas.add(chave)
             final.append(ev)
     
     try:
-        # Ordena por data decrescente
+        # Ordena por data decrescente (mais recente primeiro)
+        # Lida com formatos de data "DD/MM/YYYY HH:MM" ou "DD/MM/YYYY"
         final.sort(key=lambda x: datetime.strptime(x['data'], "%d/%m/%Y %H:%M") if len(x['data']) > 10 else datetime.strptime(x['data'], "%d/%m/%Y"), reverse=True)
     except: pass
 
-    return jsonify({"status": status_final, "eventos": final, "novo_codigo": novo_codigo})
+    return jsonify({
+        "status": status_final, 
+        "eventos": final, 
+        "codigo_original": codigo,
+        "novo_codigo": novo_codigo
+    })
 
 @app.route("/")
 def home():
-    return "API de rastreamento Sermente V29 (Stable Chain) 🚚"
+    return "API de rastreamento Sermente V30 (Chain Master) 🚚"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
