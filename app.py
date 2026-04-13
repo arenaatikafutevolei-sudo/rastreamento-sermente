@@ -183,80 +183,48 @@ def get_cainiao_tracking_v2(tracking_number):
     return None
 
 def get_loggi_tracking(tracking_code):
-    """Lógica de rastreamento para Loggi via Scraping e Mimetismo de Sessão"""
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8",
-        "Referer": f"https://www.loggi.com/rastreador/{tracking_code}",
-        "Origin": "https://www.loggi.com"
-    }
-    
+    """Lógica de rastreamento para Loggi via API Linketrack (Proxy para contornar bloqueio de IP)"""
+    # Usando o Linketrack como proxy para a Loggi, já que ele suporta transportadoras nacionais
+    url = f"https://api.linketrack.com/track/json?user=teste&token=1abcd1234567890&codigo={tracking_code}"
     try:
-        # Cria uma sessão para manter cookies e simular um acesso real
-        session = requests.Session()
-        session.headers.update(headers)
-        
-        # 1. Primeiro acesso para obter cookies de sessão
-        session.get("https://www.loggi.com/", timeout=10)
-        
-        # 2. Acesso à página de rastreio
-        url_html = f"https://www.loggi.com/rastreador/{tracking_code}"
-        res = session.get(url_html, timeout=15)
-        
-        if res.status_code == 200:
-            html = res.text
-            
-            # Busca status e descrição no HTML
-            status_match = re.search(r'<h1[^>]*>(.*?)</h1>', html)
-            status = status_match.group(1).strip() if status_match else None
-            
-            desc_match = re.search(r'<h2[^>]*>(.*?)</h2>', html)
-            desc = desc_match.group(1).strip() if desc_match else ""
-            
-            # Se não achou h1, tenta buscar por padrões de texto
-            if not status:
-                if "Preparando para transferência" in html: status = "Preparando para transferência"
-                elif "Saiu para entrega" in html: status = "Saiu para entrega"
-                elif "Entregue" in html: status = "Entregue"
-                elif "Pedido criado" in html: status = "Pedido criado"
-            
-            if status:
-                # Extração de eventos simples do HTML
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(url, headers=headers, timeout=15)
+        if response.status_code == 200:
+            data = response.json()
+            eventos_raw = data.get("eventos", [])
+            if eventos_raw:
                 eventos = []
-                data_atual = datetime.now().strftime("%d/%m/%Y %H:%M")
-                eventos.append({"data": data_atual, "descricao": f"{status}: {desc}"})
-                
-                # Procura por "Pedido criado" e data associada no texto
-                pedido_match = re.search(r'Pedido criado.*?(\d+\s+[a-z]{3})', html, re.IGNORECASE | re.DOTALL)
-                if pedido_match:
-                    data_pedido = formatar_data_br(pedido_match.group(1))
-                    eventos.append({"data": data_pedido, "descricao": "Pedido criado"})
-                
-                return {"status": status, "eventos": eventos}
+                for ev in eventos_raw:
+                    data_br = f"{ev.get('data')} {ev.get('hora')}"
+                    desc = ev.get("status")
+                    local = f"{ev.get('local', '')} {ev.get('cidade', '')}/{ev.get('uf', '')}".strip()
+                    eventos.append({"data": data_br, "descricao": f"{desc} ({local})" if local else desc})
+                return {"status": eventos[0]["descricao"], "eventos": eventos}
+    except: pass
 
-        # 3. Fallback: Consulta de API (Rota E-commerce)
+    # Fallback 2: API de E-commerce Direta da Loggi (Com Headers de Browser)
+    try:
         url_api = f"https://www.loggi.com/rastreador/api/v1/packages/{tracking_code}/"
-        res_api = session.get(url_api, timeout=10)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json",
+            "Referer": f"https://www.loggi.com/rastreador/{tracking_code}"
+        }
+        res_api = requests.get(url_api, headers=headers, timeout=10)
         if res_api.status_code == 200:
             data = res_api.json()
             status = data.get("status", "Em trânsito")
-            # Mapeamento de Status
+            # Tradução de status Loggi
             status_map = {"CHECKED_IN": "Preparando para transferência", "OUT_FOR_DELIVERY": "Saiu para entrega", "DELIVERED": "Entregue"}
             status = status_map.get(status, status)
-            
             history = data.get("tracking_history", [])
             eventos = []
             for h in history:
-                eventos.append({
-                    "data": formatar_data_br(h.get("date")),
-                    "descricao": str(h.get("status_text") or h.get("status"))
-                })
-            if not eventos:
-                eventos.append({"data": datetime.now().strftime("%d/%m/%Y %H:%M"), "descricao": status})
+                eventos.append({"data": formatar_data_br(h.get("date")), "descricao": str(h.get("status_text") or h.get("status"))})
+            if not eventos: eventos.append({"data": datetime.now().strftime("%d/%m/%Y %H:%M"), "descricao": status})
             return {"status": status, "eventos": eventos}
-            
     except: pass
+    
     return None
 
 def logic_unificada(codigo):
@@ -267,7 +235,8 @@ def logic_unificada(codigo):
     if res_spx: return res_spx
     
     # 2. Loggi (Identificação Dinâmica)
-    if codigo.startswith("NE") or codigo.endswith("LG") or len(codigo) > 15:
+    # Suporte a NE...LG, MR... e códigos longos
+    if codigo.startswith("NE") or codigo.startswith("MR") or codigo.endswith("LG") or len(codigo) > 15:
         res_loggi = get_loggi_tracking(codigo)
         if res_loggi: return res_loggi
     
@@ -306,7 +275,7 @@ def logic_unificada(codigo):
 
         return {"status": status_final, "eventos": final, "codigo_original": codigo, "novo_codigo": novo_codigo}
 
-    # Fallback Final (Tenta Loggi uma última vez se nada funcionou)
+    # Fallback Final para Loggi
     res_loggi_final = get_loggi_tracking(codigo)
     if res_loggi_final: return res_loggi_final
 
@@ -326,7 +295,7 @@ def rastrear_global(codigo):
 
 @app.route("/")
 def home():
-    return "API de rastreamento Sermente V39 (Loggi Hybrid) 🚚"
+    return "API de rastreamento Sermente V40 (Loggi Ultra API) 🚚"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
