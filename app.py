@@ -115,8 +115,7 @@ def get_spx_tracking(tracking_number):
         return None
 
 def get_correios_tracking(tracking_number):
-    """Lógica de rastreamento direta para códigos brasileiros (Correios) via API alternativa estável"""
-    # Usando um endpoint de rastreio público que costuma ser mais estável para códigos BR
+    """Lógica de rastreamento direta para códigos brasileiros (Correios) via API Linketrack"""
     url = f"https://api.linketrack.com/track/json?user=teste&token=1abcd1234567890&codigo={tracking_number}"
     try:
         response = requests.get(url, timeout=15)
@@ -139,7 +138,7 @@ def get_correios_tracking(tracking_number):
     return None
 
 def get_cainiao_tracking_v2(tracking_number):
-    """Lógica de rastreamento Cainiao com varredura de texto para novo código"""
+    """Lógica de rastreamento Cainiao com extração forçada de código dos Correios"""
     url = f"https://global.cainiao.com/global/detail.json?mailNos={tracking_number}&lang=pt-BR"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -153,8 +152,11 @@ def get_cainiao_tracking_v2(tracking_number):
             data = response.json()
             
             # Varredura de texto (Regex Scan) para encontrar códigos brasileiros (ex: NN135003362BR)
-            match_br = re.search(r'[A-Z]{2}[0-9]{9}BR', data_text)
-            novo_codigo = match_br.group(0) if match_br else None
+            # Focamos em códigos que terminam em BR e começam com duas letras, seguidas de 9 números
+            match_br = re.search(r'([A-Z]{2}[0-9]{9}BR)', data_text)
+            novo_codigo = match_br.group(1) if match_br else None
+            
+            # Se o código encontrado for o mesmo que já estamos rastreando, ignoramos como "novo"
             if novo_codigo == tracking_number: novo_codigo = None
             
             module = data.get("module", [])
@@ -177,128 +179,62 @@ def get_cainiao_tracking_v2(tracking_number):
         pass
     return None
 
-def get_parcelsapp_tracking(tracking_number):
-    """Lógica de rastreamento global via API do ParcelsApp"""
-    api_url = "https://parcelsapp.com/api/v2/parcels"
-    payload = {"trackingId": tracking_number, "language": "pt", "country": "Brazil"}
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "Referer": "https://parcelsapp.com/en/tracking/",
-        "Origin": "https://parcelsapp.com",
-        "X-Requested-With": "XMLHttpRequest"
-    }
-    try:
-        response = requests.post(api_url, json=payload, headers=headers, timeout=20)
-        if response.status_code == 200:
-            data = response.json()
-            states = data.get("states", [])
-            
-            novo_codigo = None
-            for attr in data.get("attributes", []):
-                if attr.get("name") in ["tracking_number", "destination_tracking_number", "last_tracking_number"]:
-                    val = attr.get("val")
-                    if val and val != tracking_number and re.match(r'^[A-Z]{2}[0-9]{9}[A-Z]{2}$', val):
-                        novo_codigo = val
-                        break
-
-            if states:
-                states = sorted(states, key=lambda x: x.get("date", ""), reverse=True)
-                status_text = states[0].get("status") or "Em trânsito"
-                eventos = []
-                for state in states:
-                    raw_date = state.get("date", "")
-                    data_str = raw_date.replace("T", " ").split(".")[0] if "T" in raw_date else raw_date
-                    descricao = state.get("status", "")
-                    local = state.get("location", "")
-                    if local: descricao = f"{descricao} ({local})"
-                    if "parcelsapp.com" not in str(descricao).lower():
-                        eventos.append({
-                            "data": formatar_data_br(data_str),
-                            "descricao": traduzir_descricao(str(descricao))
-                        })
-                return {"status": traduzir_descricao(status_text), "eventos": eventos, "novo_codigo": novo_codigo}
-    except:
-        pass
-    return None
-
 @app.route("/rastreio/<codigo>")
 def rastrear_unificado(codigo):
-    """ROTA UNIFICADA V28: Rastreio em Cadeia Forçado (Direct Chain)"""
-    # 1. Tenta SPX primeiro
+    """ROTA UNIFICADA V29: Cainiao + Correios (Sem ParcelsApp)"""
+    codigo = str(codigo).strip().upper()
+    
+    # 1. Tenta SPX primeiro (Prioridade 100%)
     resultado_spx = get_spx_tracking(codigo)
     if resultado_spx: return jsonify(resultado_spx)
     
     # 2. Se for código brasileiro (termina em BR), tenta Correios direto
-    if str(codigo).upper().endswith("BR"):
+    if codigo.endswith("BR"):
         resultado_br = get_correios_tracking(codigo)
         if resultado_br: return jsonify(resultado_br)
     
-    # 3. Tenta Cainiao e ParcelsApp para detectar novo código e eventos iniciais
+    # 3. Tenta Cainiao (Fonte de Dados Principal para Internacionais)
     res_cainiao = get_cainiao_tracking_v2(codigo)
-    res_parcels = get_parcelsapp_tracking(codigo)
     
-    if not res_cainiao and not res_parcels:
+    if not res_cainiao:
         return jsonify({
             "status": "Aguardando atualização",
             "eventos": [{"data": datetime.now().strftime("%d/%m/%Y %H:%M"), "descricao": "A transportadora ainda está processando as informações. Tente novamente em alguns instantes."}]
         })
     
-    # Detecção de novo código (Correios)
-    novo_codigo = (res_cainiao.get("novo_codigo") if res_cainiao else None) or \
-                  (res_parcels.get("novo_codigo") if res_parcels else None)
+    # Detecção de novo código (Correios) extraído da Cainiao
+    novo_codigo = res_cainiao.get("novo_codigo")
+    eventos_finais = res_cainiao.get("eventos", [])
+    status_final = res_cainiao.get("status")
     
-    eventos_finais = (res_parcels.get("eventos", []) if res_parcels else []) + \
-                    (res_cainiao.get("eventos", []) if res_cainiao else [])
-    
-    status_final = (res_parcels.get("status") if res_parcels else res_cainiao.get("status"))
-
-    # Se detectou um novo código (ex: NN...BR), faz o rastreio em cadeia FORÇADO
-    if novo_codigo and re.match(r'^[A-Z]{2}[0-9]{9}[A-Z]{2}$', novo_codigo):
-        # Tenta Correios e ParcelsApp para o novo código
+    # 4. Rastreio em Cadeia: Se detectou um novo código BR, consulta Correios
+    if novo_codigo and re.match(r'^[A-Z]{2}[0-9]{9}BR$', novo_codigo):
         res_novo_br = get_correios_tracking(novo_codigo)
-        res_novo_parcels = get_parcelsapp_tracking(novo_codigo)
-        
         if res_novo_br:
+            # Mescla os eventos dos Correios (mais recentes) com os da Cainiao
             eventos_finais = res_novo_br.get("eventos", []) + eventos_finais
             status_final = res_novo_br["status"]
-        
-        if res_novo_parcels:
-            eventos_finais = res_novo_parcels.get("eventos", []) + eventos_finais
-            if not res_novo_br: status_final = res_novo_parcels["status"]
 
     # Limpeza de duplicados e ordenação
     chaves_unicas = set()
     final = []
     for ev in eventos_finais:
-        chave = f"{ev['data'][:16]}-{ev['descricao'][:30]}".lower()
+        # Chave baseada em data (minutos) e início da descrição para evitar duplicidade de APIs diferentes
+        chave = f"{ev['data'][:16]}-{ev['descricao'][:20]}".lower()
         if chave not in chaves_unicas:
             chaves_unicas.add(chave)
             final.append(ev)
     
     try:
+        # Ordena por data decrescente
         final.sort(key=lambda x: datetime.strptime(x['data'], "%d/%m/%Y %H:%M") if len(x['data']) > 10 else datetime.strptime(x['data'], "%d/%m/%Y"), reverse=True)
     except: pass
 
     return jsonify({"status": status_final, "eventos": final, "novo_codigo": novo_codigo})
 
-@app.route("/rastreio-global/<codigo>")
-def rastrear_global_direto(codigo):
-    if str(codigo).upper().endswith("BR"):
-        resultado = get_correios_tracking(codigo)
-        if resultado: return jsonify(resultado)
-    
-    resultado = get_parcelsapp_tracking(codigo)
-    if not resultado:
-        resultado = get_cainiao_tracking_v2(codigo)
-    if not resultado:
-        return jsonify({"status": "Não encontrado", "eventos": [{"data": "-", "descricao": "Nenhuma informação encontrada."}]})
-    return jsonify(resultado)
-
 @app.route("/")
 def home():
-    return "API de rastreamento Sermente V28 (Direct Chain) 🚚"
+    return "API de rastreamento Sermente V29 (Stable Chain) 🚚"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
