@@ -183,71 +183,48 @@ def get_cainiao_tracking_v2(tracking_number):
     return None
 
 def get_loggi_tracking(tracking_code):
-    """Lógica de rastreamento para Loggi via Endpoint de E-commerce com Mimetismo Real"""
-    # Esta lógica é baseada na V37 que funcionou, mas agora de forma dinâmica
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Referer": f"https://www.loggi.com/rastreador/{tracking_code}",
-        "Origin": "https://www.loggi.com",
-        "Sec-Fetch-Dest": "empty",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "same-origin"
-    }
-    
+    """Lógica de rastreamento para Loggi via Linketrack (Proxy para contornar bloqueio de IP)"""
+    # Linketrack suporta transportadoras nacionais e não sofre bloqueio de IP do Railway
+    url = f"https://api.linketrack.com/track/json?user=teste&token=1abcd1234567890&codigo={tracking_code}"
     try:
-        # 1. Endpoint de E-commerce (Rota V37 que deu certo)
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(url, headers=headers, timeout=15)
+        if response.status_code == 200:
+            data = response.json()
+            eventos_raw = data.get("eventos", [])
+            if eventos_raw:
+                eventos = []
+                for ev in eventos_raw:
+                    data_br = f"{ev.get('data')} {ev.get('hora')}"
+                    desc = ev.get("status")
+                    local = f"{ev.get('local', '')} {ev.get('cidade', '')}/{ev.get('uf', '')}".strip()
+                    eventos.append({"data": data_br, "descricao": f"{desc} ({local})" if local else desc})
+                return {"status": eventos[0]["descricao"], "eventos": eventos}
+    except: pass
+
+    # Fallback: API Direta da Loggi (Caso o Linketrack falhe)
+    try:
         url_api = f"https://www.loggi.com/rastreador/api/v1/packages/{tracking_code}/"
-        res = requests.get(url_api, headers=headers, timeout=12)
-        
-        if res.status_code == 200:
-            data = res.json()
-            status_raw = data.get("status", "Em trânsito")
-            
-            # Mapeamento de Status Amigável
-            status_map = {
-                "CHECKED_IN": "Preparando para transferência",
-                "OUT_FOR_DELIVERY": "Saiu para entrega",
-                "DELIVERED": "Entregue",
-                "IN_TRANSIT": "Em trânsito",
-                "PENDING": "Pendente"
-            }
-            status = status_map.get(status_raw, status_raw)
-            
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json",
+            "Referer": f"https://www.loggi.com/rastreador/{tracking_code}"
+        }
+        res_api = requests.get(url_api, headers=headers, timeout=10)
+        if res_api.status_code == 200:
+            data = res_api.json()
+            status = data.get("status", "Em trânsito")
+            # Tradução de status Loggi
+            status_map = {"CHECKED_IN": "Preparando para transferência", "OUT_FOR_DELIVERY": "Saiu para entrega", "DELIVERED": "Entregue"}
+            status = status_map.get(status, status)
             history = data.get("tracking_history", [])
             eventos = []
             for h in history:
-                eventos.append({
-                    "data": formatar_data_br(h.get("date")),
-                    "descricao": str(h.get("status_text") or h.get("status"))
-                })
-            
-            if not eventos and status:
-                eventos.append({
-                    "data": datetime.now().strftime("%d/%m/%Y %H:%M"),
-                    "descricao": status
-                })
-            
-            if eventos:
-                return {"status": status, "eventos": eventos}
-
-        # 2. Fallback: Scraping de Página Pública (Mimetismo de Texto)
-        url_html = f"https://www.loggi.com/rastreador/{tracking_code}"
-        res_h = requests.get(url_html, headers=headers, timeout=10)
-        if res_h.status_code == 200:
-            html = res_h.text
-            status_match = re.search(r'<h1[^>]*>(.*?)</h1>', html)
-            if status_match:
-                status_txt = status_match.group(1).strip()
-                desc_match = re.search(r'<h2[^>]*>(.*?)</h2>', html)
-                desc_txt = desc_match.group(1).strip() if desc_match else ""
-                if status_txt and "momento" not in status_txt.lower():
-                    return {
-                        "status": status_txt,
-                        "eventos": [{"data": datetime.now().strftime("%d/%m/%Y %H:%M"), "descricao": f"{status_txt}: {desc_txt}"}]
-                    }
+                eventos.append({"data": formatar_data_br(h.get("date")), "descricao": str(h.get("status_text") or h.get("status"))})
+            if not eventos: eventos.append({"data": datetime.now().strftime("%d/%m/%Y %H:%M"), "descricao": status})
+            return {"status": status, "eventos": eventos}
     except: pass
+    
     return None
 
 def logic_unificada(codigo):
@@ -298,7 +275,7 @@ def logic_unificada(codigo):
 
         return {"status": status_final, "eventos": final, "codigo_original": codigo, "novo_codigo": novo_codigo}
 
-    # Fallback Final para Loggi (Caso o padrão não tenha sido detectado antes)
+    # Fallback Final para Loggi
     res_loggi_final = get_loggi_tracking(codigo)
     if res_loggi_final: return res_loggi_final
 
@@ -318,7 +295,7 @@ def rastrear_global(codigo):
 
 @app.route("/")
 def home():
-    return "API de rastreamento Sermente V41 (Loggi Master Universal) 🚚"
+    return "API de rastreamento Sermente V42 (Loggi Master Linketrack) 🚚"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
