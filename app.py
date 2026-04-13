@@ -182,109 +182,42 @@ def get_cainiao_tracking_v2(tracking_number):
     except: pass
     return None
 
-def get_loggi_tracking(tracking_code):
-    """
-    Lógica de rastreamento para Loggi melhorada (V45).
-    Tenta primeiro a API pública da Loggi com headers de navegador mobile.
-    Se falhar, tenta o Linketrack.
-    """
-    tracking_code = str(tracking_code).strip().upper()
-    
-    # 1. Tentativa via API Pública da Loggi (Headers Mobile para evitar Cloudflare)
-    try:
-        url_api = f"https://www.loggi.com/rastreador/api/v1/packages/{tracking_code}/"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Linux; Android 13; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36",
-            "Accept": "application/json, text/plain, */*",
-            "Referer": f"https://www.loggi.com/rastreador/{tracking_code}",
-            "X-Requested-With": "XMLHttpRequest",
-            "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7"
-        }
-        res_api = requests.get(url_api, headers=headers, timeout=12)
-        
-        if res_api.status_code == 200:
-            data = res_api.json()
-            status_raw = data.get("status", "Em trânsito")
-            
-            # Mapeamento de status amigáveis
-            status_map = {
-                "CHECKED_IN": "Preparando para transferência",
-                "OUT_FOR_DELIVERY": "Saiu para entrega",
-                "DELIVERED": "Entregue",
-                "STOCKED": "Recebido na unidade",
-                "PICKED_UP": "Coletado",
-                "PENDING": "Pedido criado",
-                "CANCELED": "Cancelado"
-            }
-            status = status_map.get(status_raw, status_raw)
-            
-            history = data.get("tracking_history", [])
-            eventos = []
-            for h in history:
-                data_evento = formatar_data_br(h.get("date"))
-                desc = h.get("status_text") or h.get("status")
-                if data_evento and desc:
-                    eventos.append({"data": data_evento, "descricao": str(desc)})
-            
-            # Ordenar eventos por data decrescente
-            if eventos:
-                try:
-                    eventos.sort(key=lambda x: datetime.strptime(x['data'], "%d/%m/%Y %H:%M") if len(x['data']) > 10 else datetime.strptime(x['data'], "%d/%m/%Y"), reverse=True)
-                except: pass
-            else:
-                eventos.append({
-                    "data": datetime.now().strftime("%d/%m/%Y %H:%M"),
-                    "descricao": status
-                })
-            
-            return {"status": status, "eventos": eventos}
-    except: pass
-
-    # 2. Fallback: Linketrack (Proxy)
-    try:
-        url_link = f"https://api.linketrack.com/track/json?user=teste&token=1abcd1234567890&codigo={tracking_code}"
-        res_link = requests.get(url_link, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
-        if res_link.status_code == 200:
-            data = res_link.json()
-            eventos_raw = data.get("eventos", [])
-            if eventos_raw:
-                eventos = []
-                for ev in eventos_raw:
-                    data_br = f"{ev.get('data')} {ev.get('hora')}"
-                    desc = ev.get("status")
-                    local = f"{ev.get('local', '')} {ev.get('cidade', '')}/{ev.get('uf', '')}".strip()
-                    eventos.append({"data": data_br, "descricao": f"{desc} ({local})" if local else desc})
-                return {"status": eventos[0]["descricao"], "eventos": eventos}
-    except: pass
-    
-    return None
-
 def logic_unificada(codigo):
     codigo = str(codigo).strip().upper()
     
+    # --- DETECÇÃO LOGGI (Solução Híbrida) ---
+    # Padrões Loggi: NE...LG, MR... ou códigos terminando em LG
+    if codigo.startswith("NE") or codigo.startswith("MR") or codigo.endswith("LG"):
+        return {
+            "status": "CÓDIGO DA LOGGI IDENTIFICADO",
+            "loggi_redirect": True,
+            "loggi_url": f"https://www.loggi.com/rastreador/{codigo}",
+            "eventos": [
+                {
+                    "data": datetime.now().strftime("%d/%m/%Y %H:%M"),
+                    "descricao": "POR FAVOR, CONSULTE CLICANDO NO BOTÃO ABAIXO"
+                }
+            ],
+            "codigo_original": codigo
+        }
+
     # 1. SPX (Prioridade Máxima)
     res_spx = get_spx_tracking(codigo)
     if res_spx: return res_spx
-
-    # 2. Loggi (Identificação por Padrão)
-    # Padrões: NE...LG, MR..., ou códigos que terminam em LG
-    if codigo.startswith("NE") or codigo.startswith("MR") or codigo.endswith("LG"):
-        res_loggi = get_loggi_tracking(codigo)
-        if res_loggi: return res_loggi
     
-    # 3. Correios Direto
-    if codigo.endswith("BR") and len(codigo) == 13:
+    # 2. Correios Direto
+    if (codigo.endswith("BR") and len(codigo) == 13) or re.match(r'^[A-Z]{2}[0-9]{9}BR$', codigo):
         res_br = get_correios_tracking(codigo)
         if res_br: return res_br
     
-    # 4. Cainiao (Internacional)
+    # 3. Cainiao (Internacional)
     res_cainiao = get_cainiao_tracking_v2(codigo)
     if res_cainiao:
         novo_codigo = res_cainiao.get("novo_codigo")
         eventos_finais = res_cainiao.get("eventos", [])
         status_final = res_cainiao.get("status")
         
-        # 5. Chain Tracking (Cainiao -> Correios)
+        # Chain Tracking (Cainiao -> Correios)
         if novo_codigo and re.match(r'^[A-Z]{2}[0-9]{9}BR$', novo_codigo):
             res_novo_br = get_correios_tracking(novo_codigo)
             if res_novo_br:
@@ -307,10 +240,6 @@ def logic_unificada(codigo):
 
         return {"status": status_final, "eventos": final, "codigo_original": codigo, "novo_codigo": novo_codigo}
 
-    # Fallback Final para Loggi (Caso não tenha batido no padrão inicial)
-    res_loggi_final = get_loggi_tracking(codigo)
-    if res_loggi_final: return res_loggi_final
-
     return {
         "status": "Aguardando atualização",
         "eventos": [{"data": datetime.now().strftime("%d/%m/%Y %H:%M"), "descricao": "A transportadora ainda está processando as informações."}],
@@ -327,7 +256,7 @@ def rastrear_global(codigo):
 
 @app.route("/")
 def home():
-    return "API de rastreamento Sermente V45 (Loggi Fixed) 🚚"
+    return "API de rastreamento Sermente V46 (Loggi Hybrid) 🚚"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
