@@ -183,54 +183,62 @@ def get_cainiao_tracking_v2(tracking_number):
     return None
 
 def get_loggi_tracking(tracking_code):
-    """Lógica de rastreamento para Loggi via Emulação de Navegador e Parser de Conteúdo"""
-    # Esta técnica é a prova de bloqueios de API, pois simula o acesso de um usuário comum
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Referer": f"https://www.loggi.com/rastreador/{tracking_code}",
-        "Origin": "https://www.loggi.com"
-    }
-    
+    """Lógica de rastreamento para Loggi via Linketrack (Proxy para contornar bloqueio de IP)"""
+    # Linketrack suporta transportadoras nacionais e não sofre bloqueio de IP do Railway
+    url = f"https://api.linketrack.com/track/json?user=teste&token=1abcd1234567890&codigo={tracking_code}"
     try:
-        # 1. Tentativa de Consulta Direta à API de E-commerce (Rota V37 dinâmica)
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(url, headers=headers, timeout=15)
+        if response.status_code == 200:
+            data = response.json()
+            eventos_raw = data.get("eventos", [])
+            if eventos_raw:
+                eventos = []
+                for ev in eventos_raw:
+                    data_br = f"{ev.get('data')} {ev.get('hora')}"
+                    desc = ev.get("status")
+                    local = f"{ev.get('local', '')} {ev.get('cidade', '')}/{ev.get('uf', '')}".strip()
+                    eventos.append({"data": data_br, "descricao": f"{desc} ({local})" if local else desc})
+                return {"status": eventos[0]["descricao"], "eventos": eventos}
+    except: pass
+
+    # Fallback: API Direta da Loggi (Caso o Linketrack falhe)
+    try:
         url_api = f"https://www.loggi.com/rastreador/api/v1/packages/{tracking_code}/"
-        res = requests.get(url_api, headers=headers, timeout=12)
-        
-        if res.status_code == 200:
-            data = res.json()
-            status_raw = data.get("status", "Em trânsito")
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json",
+            "Referer": f"https://www.loggi.com/rastreador/{tracking_code}"
+        }
+        res_api = requests.get(url_api, headers=headers, timeout=10)
+        if res_api.status_code == 200:
+            data = res_api.json()
+            status = data.get("status", "Em trânsito")
+            # Tradução de status Loggi
             status_map = {"CHECKED_IN": "Preparando para transferência", "OUT_FOR_DELIVERY": "Saiu para entrega", "DELIVERED": "Entregue"}
-            status = status_map.get(status_raw, status_raw)
+            status = status_map.get(status, status)
             history = data.get("tracking_history", [])
             eventos = []
             for h in history:
                 eventos.append({"data": formatar_data_br(h.get("date")), "descricao": str(h.get("status_text") or h.get("status"))})
-            if eventos: return {"status": status, "eventos": eventos}
-
-        # 2. Fallback: Consulta via Linketrack (Proxy estável)
-        url_linke = f"https://api.linketrack.com/track/json?user=teste&token=1abcd1234567890&codigo={tracking_code}"
-        res_l = requests.get(url_linke, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-        if res_l.status_code == 200:
-            data_l = res_l.json()
-            eventos_l = data_l.get("eventos", [])
-            if eventos_l:
-                evs = [{"data": f"{ev['data']} {ev['hora']}", "descricao": f"{ev['status']} ({ev.get('local', '')})"} for ev in eventos_l]
-                return {"status": evs[0]["descricao"], "eventos": evs}
-
-        # 3. Fallback Final: Scraping de Página Pública (Mimetismo de Texto)
-        url_html = f"https://www.loggi.com/rastreador/{tracking_code}"
-        res_h = requests.get(url_html, headers=headers, timeout=10)
-        if res_h.status_code == 200:
-            html = res_h.text
-            status_match = re.search(r'<h1[^>]*>(.*?)</h1>', html)
-            if status_match:
-                status_txt = status_match.group(1).strip()
-                if status_txt and "momento" not in status_txt.lower():
-                    return {"status": status_txt, "eventos": [{"data": datetime.now().strftime("%d/%m/%Y %H:%M"), "descricao": status_txt}]}
+            if not eventos: eventos.append({"data": datetime.now().strftime("%d/%m/%Y %H:%M"), "descricao": status})
+            return {"status": status, "eventos": eventos}
     except: pass
+    
     return None
+
+# ---------------------------------------------------------------------------
+# Detecção de códigos Loggi
+# Padrões conhecidos:
+#   - Termina com "LG"  → ex: NE0A37B35CE47CBBLG, NE9CA5F77BCAC207LG
+#   - Começa com "MR"   → ex: MRGIHQV7
+# ---------------------------------------------------------------------------
+def is_loggi_code(codigo):
+    if codigo.endswith("LG"):
+        return True
+    if codigo.startswith("MR") and len(codigo) >= 6:
+        return True
+    return False
 
 def logic_unificada(codigo):
     codigo = str(codigo).strip().upper()
@@ -238,25 +246,41 @@ def logic_unificada(codigo):
     # 1. SPX (Prioridade Máxima)
     res_spx = get_spx_tracking(codigo)
     if res_spx: return res_spx
-    
-    # 2. Loggi (Identificação Dinâmica)
-    if codigo.startswith("NE") or codigo.startswith("MR") or codigo.endswith("LG") or len(codigo) > 15:
+
+    # 2. Loggi — Solução provisória: identifica o código e redireciona para o site da Loggi
+    #    Quando a integração direta estiver pronta, basta remover este bloco.
+    if is_loggi_code(codigo):
+        return {
+            "status": "CODIGO DA LOGGI, CONSULTE CLICANDO NO BOTAO ABAIXO",
+            "loggi_redirect": True,
+            "loggi_url": f"https://www.loggi.com/rastreador/{codigo}",
+            "eventos": [
+                {
+                    "data": datetime.now().strftime("%d/%m/%Y %H:%M"),
+                    "descricao": "Código identificado como Loggi. Clique no botão abaixo para rastrear diretamente no site da Loggi."
+                }
+            ],
+            "codigo_original": codigo
+        }
+
+    # 3. Loggi via API (fallback para prefixos NE/MR sem sufixo LG e códigos longos)
+    if codigo.startswith("NE") or codigo.startswith("MR") or len(codigo) > 15:
         res_loggi = get_loggi_tracking(codigo)
         if res_loggi: return res_loggi
     
-    # 3. Correios Direto
+    # 4. Correios Direto
     if codigo.endswith("BR") and len(codigo) == 13:
         res_br = get_correios_tracking(codigo)
         if res_br: return res_br
     
-    # 4. Cainiao (Internacional)
+    # 5. Cainiao (Internacional)
     res_cainiao = get_cainiao_tracking_v2(codigo)
     if res_cainiao:
         novo_codigo = res_cainiao.get("novo_codigo")
         eventos_finais = res_cainiao.get("eventos", [])
         status_final = res_cainiao.get("status")
         
-        # 5. Chain Tracking
+        # 6. Chain Tracking
         if novo_codigo and re.match(r'^[A-Z]{2}[0-9]{9}BR$', novo_codigo):
             res_novo_br = get_correios_tracking(novo_codigo)
             if res_novo_br:
@@ -299,7 +323,7 @@ def rastrear_global(codigo):
 
 @app.route("/")
 def home():
-    return "API de rastreamento Sermente V43 (Loggi Selenium Master) 🚚"
+    return "API de rastreamento Sermente V43 (Loggi Provisório) 🚚"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
