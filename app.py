@@ -65,7 +65,16 @@ def formatar_data_br(data_str):
     if not data_str: return "-"
     data_str = str(data_str)
     try:
-        # Lida com timestamp da Loggi (ex: 1712752800000)
+        # Lida com formatos de data brasileiros curtos (ex: 10 abr)
+        meses = {"jan": "01", "fev": "02", "mar": "03", "abr": "04", "mai": "05", "jun": "06", 
+                 "jul": "07", "ago": "08", "set": "09", "out": "10", "nov": "11", "dez": "12"}
+        match_curto = re.search(r'(\d+)\s+([a-z]{3})', data_str.lower())
+        if match_curto:
+            dia = match_curto.group(1).zfill(2)
+            mes = meses.get(match_curto.group(2), "01")
+            ano = datetime.now().year
+            return f"{dia}/{mes}/{ano}"
+
         if data_str.isdigit() and len(data_str) >= 13:
             dt = datetime.fromtimestamp(int(data_str) / 1000)
             return dt.strftime("%d/%m/%Y %H:%M")
@@ -174,53 +183,61 @@ def get_cainiao_tracking_v2(tracking_number):
     return None
 
 def get_loggi_tracking(tracking_code):
-    """Lógica de rastreamento para Loggi via API GraphQL e Fallback Scraping"""
-    url_graphql = "https://www.loggi.com/graphql"
-    
-    # Query 1: Rastreio Público (Mais comum para NE...LG)
-    query_1 = """
-    query publicPackageTracker($trackingCode: String!) {
-      publicPackageTracker(trackingCode: $trackingCode) {
-        trackingCode
-        status
-        statusHistory {
-          status
-          description
-          dateTime
-        }
-      }
-    }
-    """
-    
-    # Query 2: Tracker (Usada no app novo)
-    query_2 = """
-    query packageTracker($trackingKey: String!) {
-      packageTracker(trackingKey: $trackingKey) {
-        currentStatus {
-          text
-          originalDateTime
-        }
-        statusHistory {
-          text
-          originalDateTime
-        }
-      }
-    }
-    """
-    
+    """Lógica de rastreamento para Loggi via Scraping de Página Pública"""
+    url_html = f"https://www.loggi.com/rastreador/{tracking_code}"
     headers = {
-        "Content-Type": "application/json",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
         "Referer": f"https://www.loggi.com/rastreador/{tracking_code}",
         "Origin": "https://www.loggi.com"
     }
     
     try:
-        # Tentativa 1: Query de Tracker Público
-        payload = {"query": query_2, "variables": {"trackingKey": tracking_code}}
-        res = requests.post(url_graphql, json=payload, headers=headers, timeout=10)
+        # Tentativa 1: Scraping direto do HTML (Página Pública)
+        res = requests.get(url_html, headers=headers, timeout=15)
         if res.status_code == 200:
-            data = res.json().get("data", {}).get("packageTracker")
+            html = res.text
+            
+            # 1. Busca Status Principal (h1)
+            status_match = re.search(r'<h1[^>]*>(.*?)</h1>', html)
+            status = status_match.group(1).strip() if status_match else "Em trânsito"
+            
+            # 2. Busca Descrição Detalhada (h2)
+            desc_match = re.search(r'<h2[^>]*>(.*?)</h2>', html)
+            desc_detalhe = desc_match.group(1).strip() if desc_match else ""
+            
+            # 3. Busca Eventos na Linha do Tempo (Scraping de Padrão de Texto)
+            eventos = []
+            
+            # Procura por "Pedido criado" e data associada
+            pedido_match = re.search(r'Pedido criado.*?(\d+\s+[a-z]{3})', html, re.IGNORECASE | re.DOTALL)
+            if pedido_match:
+                data_pedido = formatar_data_br(pedido_match.group(1))
+                eventos.append({"data": data_pedido, "descricao": "Pedido criado"})
+            
+            # Se encontrou o status principal, adiciona como evento mais recente
+            if status and "momento" not in status.lower():
+                data_atual = datetime.now().strftime("%d/%m/%Y %H:%M")
+                eventos.insert(0, {"data": data_atual, "descricao": f"{status}: {desc_detalhe}"})
+                
+            if eventos:
+                return {"status": status, "eventos": eventos}
+        
+        # Tentativa 2: Fallback GraphQL (Caso o Scraping falhe mas a API responda)
+        url_graphql = "https://www.loggi.com/graphql"
+        query = """
+        query packageTracker($trackingKey: String!) {
+          packageTracker(trackingKey: $trackingKey) {
+            currentStatus { text originalDateTime }
+            statusHistory { text originalDateTime }
+          }
+        }
+        """
+        payload = {"query": query, "variables": {"trackingKey": tracking_code}}
+        res_g = requests.post(url_graphql, json=payload, headers=headers, timeout=10)
+        if res_g.status_code == 200:
+            data = res_g.json().get("data", {}).get("packageTracker")
             if data:
                 history = data.get("statusHistory", [])
                 eventos = []
@@ -231,27 +248,6 @@ def get_loggi_tracking(tracking_code):
                     })
                 status = data.get("currentStatus", {}).get("text") or (eventos[0]["descricao"] if eventos else "Em trânsito")
                 return {"status": str(status), "eventos": eventos}
-        
-        # Tentativa 2: Scraping da página pública (Simulação)
-        # Se a API GraphQL estiver bloqueada, tentamos extrair do HTML básico
-        url_html = f"https://www.loggi.com/rastreador/{tracking_code}"
-        res_html = requests.get(url_html, headers=headers, timeout=10)
-        if res_html.status_code == 200:
-            html = res_html.text
-            # Busca status no título ou meta tags
-            status_match = re.search(r'<h1[^>]*>(.*?)</h1>', html)
-            if status_match:
-                status = status_match.group(1).strip()
-                # Busca descrição detalhada
-                desc_match = re.search(r'<h2[^>]*>(.*?)</h2>', html)
-                desc = desc_match.group(1).strip() if desc_match else ""
-                
-                # Cria evento único se encontrar dados
-                if status and "momento" not in status.lower():
-                    return {
-                        "status": status,
-                        "eventos": [{"data": datetime.now().strftime("%d/%m/%Y %H:%M"), "descricao": f"{status}: {desc}"}]
-                    }
     except: pass
     return None
 
@@ -275,7 +271,7 @@ def logic_unificada(codigo):
     # 4. Cainiao
     res_cainiao = get_cainiao_tracking_v2(codigo)
     if not res_cainiao:
-        # Fallback para Loggi caso o padrão não tenha sido detectado antes
+        # Fallback final para Loggi
         res_loggi_retry = get_loggi_tracking(codigo)
         if res_loggi_retry: return res_loggi_retry
         
@@ -321,7 +317,7 @@ def rastrear_global(codigo):
 
 @app.route("/")
 def home():
-    return "API de rastreamento Sermente V35 (Loggi Pro) 🚚"
+    return "API de rastreamento Sermente V36 (Loggi Master Pro) 🚚"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
