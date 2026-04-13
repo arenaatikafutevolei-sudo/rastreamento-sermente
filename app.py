@@ -65,6 +65,11 @@ def formatar_data_br(data_str):
     if not data_str: return "-"
     data_str = str(data_str)
     try:
+        # Lida com timestamp da Loggi (ex: 1712752800000)
+        if data_str.isdigit() and len(data_str) >= 13:
+            dt = datetime.fromtimestamp(int(data_str) / 1000)
+            return dt.strftime("%d/%m/%Y %H:%M")
+        
         limpo = data_str.replace('T', ' ').split('.')[0].split('+')[0].strip()
         if len(limpo) >= 10:
             if len(limpo) == 10:
@@ -169,49 +174,75 @@ def get_cainiao_tracking_v2(tracking_number):
     return None
 
 def get_loggi_tracking(tracking_code):
-    """Lógica de rastreamento para Loggi via API GraphQL pública"""
+    """Lógica de rastreamento para Loggi via GraphQL público"""
     url = "https://www.loggi.com/graphql"
+    
+    # Query capturada de integrações reais para rastreio público
     query = """
-    query tracking($trackingCode: String!) {
-      tracking(trackingCode: $trackingCode) {
-        trackingCode
+    query packageTracker($trackingKey: String!) {
+      packageTracker(trackingKey: $trackingKey) {
+        currentStatus {
+          text
+          originalDateTime
+        }
+        statusHistory {
+          text
+          originalDateTime
+        }
+      }
+    }
+    """
+    
+    # Fallback para códigos de e-commerce
+    query_fallback = """
+    query publicTracking($trackingCode: String!) {
+      publicTracking(trackingCode: $trackingCode) {
         status
-        lastStatusDate
-        history {
+        events {
           status
-          location
           date
         }
       }
     }
     """
-    # Algumas contas Loggi usam queries diferentes, vamos tentar a mais comum
-    # Se falhar, usaremos uma abordagem de scraping via API pública de detalhes
+    
     headers = {
         "Content-Type": "application/json",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Referer": f"https://www.loggi.com/rastreador/{tracking_code}"
     }
+    
     try:
-        # Tentativa 1: Endpoint de rastreio direto (E-commerce)
-        api_url = f"https://www.loggi.com/rastreador/api/v1/packages/{tracking_code}/"
-        res = requests.get(api_url, headers=headers, timeout=10)
+        # Tentativa 1: Query de Tracker Público
+        payload = {"query": query, "variables": {"trackingKey": tracking_code}}
+        res = requests.post(url, json=payload, headers=headers, timeout=10)
         if res.status_code == 200:
-            data = res.json()
-            # O formato da Loggi costuma ter um campo 'events' ou 'history'
-            history = data.get("history", []) or data.get("events", [])
-            if history:
+            data = res.json().get("data", {}).get("packageTracker")
+            if data:
+                history = data.get("statusHistory", [])
                 eventos = []
                 for h in history:
-                    raw_date = h.get("date") or h.get("timestamp") or ""
-                    desc = h.get("status") or h.get("description") or "Atualização"
-                    loc = h.get("location") or ""
-                    if loc: desc = f"{desc} ({loc})"
                     eventos.append({
-                        "data": formatar_data_br(raw_date),
-                        "descricao": str(desc)
+                        "data": formatar_data_br(h.get("originalDateTime")),
+                        "descricao": str(h.get("text"))
                     })
-                status = data.get("status") or (eventos[0]["descricao"] if eventos else "Em trânsito")
+                status = data.get("currentStatus", {}).get("text") or (eventos[0]["descricao"] if eventos else "Em trânsito")
+                return {"status": str(status), "eventos": eventos}
+        
+        # Tentativa 2: Query de Rastreio Simples
+        payload_f = {"query": query_fallback, "variables": {"trackingCode": tracking_code}}
+        res_f = requests.post(url, json=payload_f, headers=headers, timeout=10)
+        if res_f.status_code == 200:
+            data_f = res_f.json().get("data", {}).get("publicTracking")
+            if data_f:
+                history = data_f.get("events", [])
+                eventos = []
+                for h in history:
+                    eventos.append({
+                        "data": formatar_data_br(h.get("date")),
+                        "descricao": str(h.get("status"))
+                    })
+                status = data_f.get("status") or (eventos[0]["descricao"] if eventos else "Em trânsito")
                 return {"status": str(status), "eventos": eventos}
     except: pass
     return None
@@ -223,9 +254,8 @@ def logic_unificada(codigo):
     res_spx = get_spx_tracking(codigo)
     if res_spx: return res_spx
     
-    # 2. Loggi (Nova Integração)
-    # Códigos Loggi costumam ser alfanuméricos longos ou ter 'LG' no final
-    if len(codigo) > 15 or "LG" in codigo:
+    # 2. Loggi (Identificação por padrão de código ou sufixo LG)
+    if len(codigo) > 15 or "LG" in codigo or codigo.startswith("NE"):
         res_loggi = get_loggi_tracking(codigo)
         if res_loggi: return res_loggi
     
@@ -279,7 +309,7 @@ def rastrear_global(codigo):
 
 @app.route("/")
 def home():
-    return "API de rastreamento Sermente V33 (Loggi Ready) 🚚"
+    return "API de rastreamento Sermente V34 (Loggi Master) 🚚"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
