@@ -90,10 +90,59 @@ def formatar_data_br(data_str):
     except:
         return data_str
 
+def get_spx_tracking(tracking_number):
+    """
+    Extrai dados de rastreamento da SPX (V49).
+    Prioridade total com detecção aprimorada.
+    """
+    url = "https://spx.com.br/shipment/order/open/order/get_order_info"
+    params = {"spx_tn": tracking_number, "language_code": "pt"}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": f"https://spx.com.br/track?{tracking_number}",
+        "Accept": "application/json, text/plain, */*",
+        "X-Requested-With": "XMLHttpRequest"
+    }
+    try:
+        response = requests.get(url, params=params, headers=headers, timeout=10)
+        if response.status_code != 200: return None
+        data = response.json()
+        
+        # Se o retcode for 2 (not found), pode ser que o código seja novo ou de outra transportadora
+        if data.get("retcode") != 0: return None
+        
+        sls_info = data.get("data", {}).get("sls_tracking_info", {})
+        order_info = data.get("data", {}).get("order_info", {})
+        records = (sls_info.get("records") or []) + (order_info.get("tracking_info") or [])
+        
+        if not records: return None
+        
+        # Ordenar por tempo (mais recente primeiro)
+        records = sorted(records, key=lambda x: x.get("actual_time", 0), reverse=True)
+        
+        status_text = records[0].get("description") or records[0].get("seller_description") or "Em trânsito"
+        eventos = []
+        eventos_unicos = set()
+        
+        for item in records:
+            # Removi o filtro rigoroso de display_flag para garantir que todos os eventos apareçam
+            timestamp = item.get("actual_time")
+            data_str = datetime.fromtimestamp(timestamp).strftime("%d/%m/%Y %H:%M") if timestamp else ""
+            descricao = item.get("seller_description") or item.get("description") or item.get("buyer_description") or "Atualização"
+            
+            chave = f"{data_str}-{descricao}"
+            if chave not in eventos_unicos:
+                eventos_unicos.add(chave)
+                eventos.append({"data": data_str, "descricao": str(descricao)})
+        
+        if eventos:
+            return {"status": str(status_text), "eventos": eventos}
+    except: pass
+    return None
+
 def get_superfrete_tracking(tracking_code):
     """
-    Extrai dados de rastreamento do SuperFrete (V48).
-    Funciona bem para códigos JNS, Loggi e Correios.
+    Extrai dados de rastreamento do SuperFrete (V49).
     """
     tracking_code = str(tracking_code).strip().upper()
     url = f"https://rastreamento.superfrete.com/public/tracking/{tracking_code}?application_id=100"
@@ -107,88 +156,34 @@ def get_superfrete_tracking(tracking_code):
         response = requests.get(url, headers=headers, timeout=10)
         if response.status_code == 200:
             data = response.json()
-            
-            # 1. Tenta pegar os dados do provider_tracking (Loggi/Jadlog via SuperFrete)
             p_track = data.get("provider_tracking", {})
             if p_track and p_track.get("success"):
                 tracking_info = p_track.get("tracking", {})
                 status_atual = tracking_info.get("status", "Em trânsito")
                 eventos_raw = tracking_info.get("eventos", [])
-                
                 eventos = []
                 for ev in eventos_raw:
                     data_iso = ev.get("data", "")
                     try:
                         dt = datetime.strptime(data_iso, "%Y-%m-%d %H:%M:%S")
                         data_br = dt.strftime("%d/%m/%Y %H:%M")
-                    except:
-                        data_br = data_iso
-                    
-                    desc = ev.get("status")
-                    detalhe = ev.get("descricao")
-                    unidade = ev.get("unidade")
-                    
-                    msg = desc
-                    if detalhe and detalhe != desc:
-                        msg = f"{desc} - {detalhe}"
-                    if unidade:
-                        msg += f" ({unidade})"
+                    except: data_br = data_iso
+                    msg = f"{ev.get('status')} - {ev.get('descricao')}" if ev.get('descricao') else ev.get('status')
+                    if ev.get('unidade'): msg += f" ({ev.get('unidade')})"
                     eventos.append({"data": data_br, "descricao": msg})
-                
-                if eventos:
-                    return {"status": status_atual, "eventos": eventos}
+                if eventos: return {"status": status_atual, "eventos": eventos}
             
-            # 2. Tenta pegar os dados do tracking principal (Correios via SuperFrete)
             main_track = data.get("tracking", {})
             if main_track and main_track.get("eventos"):
                 eventos_raw = main_track.get("eventos", [])
                 eventos = []
                 for ev in eventos_raw:
                     data_br = f"{ev.get('data')} {ev.get('hora')}"
-                    desc = ev.get("status")
                     local = f"{ev.get('local', '')} - {ev.get('cidade', '')}/{ev.get('uf', '')}"
-                    eventos.append({"data": data_br, "descricao": f"{desc} ({local.strip(' - /')})"})
-                
-                if eventos:
-                    return {"status": eventos[0]["descricao"], "eventos": eventos}
-                    
+                    eventos.append({"data": data_br, "descricao": f"{ev.get('status')} ({local.strip(' - /')})"})
+                if eventos: return {"status": eventos[0]["descricao"], "eventos": eventos}
     except: pass
     return None
-
-def get_spx_tracking(tracking_number):
-    url = "https://spx.com.br/shipment/order/open/order/get_order_info"
-    params = {"spx_tn": tracking_number, "language_code": "pt"}
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Referer": f"https://spx.com.br/track?{tracking_number}",
-        "Accept": "application/json, text/plain, */*",
-        "X-Requested-With": "XMLHttpRequest"
-    }
-    try:
-        response = requests.get(url, params=params, headers=headers, timeout=10)
-        if response.status_code != 200: return None
-        data = response.json()
-        if data.get("retcode") != 0: return None
-        sls_info = data.get("data", {}).get("sls_tracking_info", {})
-        order_info = data.get("data", {}).get("order_info", {})
-        records = (sls_info.get("records") or []) + (order_info.get("tracking_info") or [])
-        if not records: return None
-        records = sorted(records, key=lambda x: x.get("actual_time", 0), reverse=True)
-        status_text = records[0].get("description") or records[0].get("seller_description") or "Em trânsito"
-        eventos = []
-        eventos_unicos = set()
-        for item in records:
-            if item.get("display_flag_v2", 0) > 0 or item.get("display_flag", 0) > 0:
-                timestamp = item.get("actual_time")
-                data_str = datetime.fromtimestamp(timestamp).strftime("%d/%m/%Y %H:%M") if timestamp else ""
-                descricao = item.get("seller_description") or item.get("description") or item.get("buyer_description") or "Atualização"
-                chave = f"{data_str}-{descricao}"
-                if chave not in eventos_unicos:
-                    eventos_unicos.add(chave)
-                    eventos.append({"data": data_str, "descricao": str(descricao)})
-        return {"status": str(status_text), "eventos": eventos}
-    except:
-        return None
 
 def get_correios_tracking(tracking_number):
     url = f"https://api.linketrack.com/track/json?user=teste&token=1abcd1234567890&codigo={tracking_number}"
@@ -201,9 +196,8 @@ def get_correios_tracking(tracking_number):
                 eventos = []
                 for ev in eventos_raw:
                     data_br = f"{ev.get('data')} {ev.get('hora')}"
-                    desc = ev.get("status")
                     local = f"{ev.get('local')} - {ev.get('cidade')}/{ev.get('uf')}"
-                    eventos.append({"data": data_br, "descricao": f"{desc} ({local})"})
+                    eventos.append({"data": data_br, "descricao": f"{ev.get('status')} ({local})"})
                 return {"status": eventos[0]["descricao"], "eventos": eventos}
     except: pass
     return None
@@ -222,7 +216,6 @@ def get_cainiao_tracking_v2(tracking_number):
             data = response.json()
             match_br = re.search(r'([A-Z]{2}[0-9]{9}BR)', data_text)
             novo_codigo = match_br.group(1) if match_br else None
-            if novo_codigo == tracking_number: novo_codigo = None
             module = data.get("module", [])
             if module:
                 detail = module[0]
@@ -232,15 +225,7 @@ def get_cainiao_tracking_v2(tracking_number):
                     raw_date = item.get("timeStr") or item.get("time") or ""
                     raw_desc = item.get("standerdDesc") or item.get("desc") or item.get("descTitle") or ""
                     if raw_date and raw_desc:
-                        eventos.append({
-                            "data": formatar_data_br(str(raw_date)),
-                            "descricao": traduzir_descricao(str(raw_desc))
-                        })
-                if not eventos and detail.get("latestEvent"):
-                    eventos.append({
-                        "data": formatar_data_br(detail.get("latestEventTimeStr")),
-                        "descricao": traduzir_descricao(detail.get("latestEventDesc"))
-                    })
+                        eventos.append({"data": formatar_data_br(str(raw_date)), "descricao": traduzir_descricao(str(raw_desc))})
                 if eventos or novo_codigo:
                     status_text = detail.get("statusDesc") or (eventos[0]["descricao"] if eventos else "Em trânsito")
                     return {"status": traduzir_descricao(status_text), "eventos": eventos, "novo_codigo": novo_codigo}
@@ -250,62 +235,39 @@ def get_cainiao_tracking_v2(tracking_number):
 def logic_unificada(codigo):
     codigo = str(codigo).strip().upper()
     
-    # 1. SPX (Prioridade Máxima - Deve vir antes de tudo)
-    # Códigos SPX costumam ter padrões específicos, mas como o usuário quer manter intacto, chamamos primeiro.
+    # 1. SPX (Prioridade Máxima)
     res_spx = get_spx_tracking(codigo)
     if res_spx: return res_spx
 
-    # 2. SuperFrete (Fallback para JNS, Loggi, Jadlog e Correios se SPX falhar)
+    # 2. SuperFrete (Fallback para Jadlog, Loggi, JNS e Correios)
     res_sf = get_superfrete_tracking(codigo)
     if res_sf: return res_sf
     
-    # 3. Correios Direto (Fallback secundário)
-    if (codigo.endswith("BR") and len(codigo) == 13) or re.match(r'^[A-Z]{2}[0-9]{9}BR$', codigo):
+    # 3. Correios Direto
+    if re.match(r'^[A-Z]{2}[0-9]{9}BR$', codigo):
         res_br = get_correios_tracking(codigo)
         if res_br: return res_br
     
-    # 4. Cainiao (Internacional)
+    # 4. Cainiao
     res_cainiao = get_cainiao_tracking_v2(codigo)
     if res_cainiao:
         novo_codigo = res_cainiao.get("novo_codigo")
         eventos_finais = res_cainiao.get("eventos", [])
         status_final = res_cainiao.get("status")
-        
-        # Chain Tracking (Cainiao -> Correios)
         if novo_codigo and re.match(r'^[A-Z]{2}[0-9]{9}BR$', novo_codigo):
             res_novo_br = get_correios_tracking(novo_codigo)
             if res_novo_br:
                 eventos_finais = res_novo_br.get("eventos", []) + eventos_finais
                 status_final = res_novo_br["status"]
+        return {"status": status_final, "eventos": eventos_finais, "codigo_original": codigo, "novo_codigo": novo_codigo}
 
-        # Limpeza e Ordenação
-        chaves_unicas = set()
-        final = []
-        for ev in eventos_finais:
-            desc_limpa = re.sub(r'[^\w\s]', '', ev['descricao'][:30]).strip().lower()
-            chave = f"{ev['data'][:16]}-{desc_limpa}"
-            if chave not in chaves_unicas:
-                chaves_unicas.add(chave)
-                final.append(ev)
-        
-        try:
-            final.sort(key=lambda x: datetime.strptime(x['data'], "%d/%m/%Y %H:%M") if len(x['data']) > 10 else datetime.strptime(x['data'], "%d/%m/%Y"), reverse=True)
-        except: pass
-
-        return {"status": status_final, "eventos": final, "codigo_original": codigo, "novo_codigo": novo_codigo}
-
-    # 5. Fallback Final (Caso seja Loggi mas não tenha batido no SuperFrete)
+    # 5. Loggi Redirect Fallback
     if codigo.startswith("NE") or codigo.startswith("MR") or codigo.endswith("LG"):
         return {
             "status": "CÓDIGO DA LOGGI IDENTIFICADO",
             "loggi_redirect": True,
             "loggi_url": f"https://www.loggi.com/rastreador/{codigo}",
-            "eventos": [
-                {
-                    "data": datetime.now().strftime("%d/%m/%Y %H:%M"),
-                    "descricao": "CONSULTE CLICANDO NO BOTÃO ABAIXO (OU SUPERFRETE)"
-                }
-            ],
+            "eventos": [{"data": datetime.now().strftime("%d/%m/%Y %H:%M"), "descricao": "CONSULTE CLICANDO NO BOTÃO ABAIXO"}],
             "codigo_original": codigo
         }
 
@@ -316,17 +278,10 @@ def logic_unificada(codigo):
     }
 
 @app.route("/rastreio/<codigo>")
-def rastrear(codigo):
-    return jsonify(logic_unificada(codigo))
-
-@app.route("/rastreio-global/<codigo>")
-def rastrear_global(codigo):
-    return jsonify(logic_unificada(codigo))
+def rastrear(codigo): return jsonify(logic_unificada(codigo))
 
 @app.route("/")
-def home():
-    return "API de rastreamento Sermente V48 (SPX Priority + SuperFrete) 🚚"
+def home(): return "API Sermente V49 (SPX Fixed) 🚚"
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 3000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 3000)))
