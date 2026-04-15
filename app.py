@@ -92,7 +92,7 @@ def formatar_data_br(data_str):
 
 def get_superfrete_tracking(tracking_code):
     """
-    Extrai dados de rastreamento do SuperFrete (V47).
+    Extrai dados de rastreamento do SuperFrete (V48).
     Funciona bem para códigos JNS, Loggi e Correios.
     """
     tracking_code = str(tracking_code).strip().upper()
@@ -250,15 +250,16 @@ def get_cainiao_tracking_v2(tracking_number):
 def logic_unificada(codigo):
     codigo = str(codigo).strip().upper()
     
-    # 1. SuperFrete (Nova Fonte Poderosa - JNS, Loggi, Jadlog)
-    res_sf = get_superfrete_tracking(codigo)
-    if res_sf: return res_sf
-
-    # 2. SPX (Prioridade Máxima)
+    # 1. SPX (Prioridade Máxima - Deve vir antes de tudo)
+    # Códigos SPX costumam ter padrões específicos, mas como o usuário quer manter intacto, chamamos primeiro.
     res_spx = get_spx_tracking(codigo)
     if res_spx: return res_spx
+
+    # 2. SuperFrete (Fallback para JNS, Loggi, Jadlog e Correios se SPX falhar)
+    res_sf = get_superfrete_tracking(codigo)
+    if res_sf: return res_sf
     
-    # 3. Correios Direto
+    # 3. Correios Direto (Fallback secundário)
     if (codigo.endswith("BR") and len(codigo) == 13) or re.match(r'^[A-Z]{2}[0-9]{9}BR$', codigo):
         res_br = get_correios_tracking(codigo)
         if res_br: return res_br
@@ -324,7 +325,7 @@ def rastrear_global(codigo):
 
 @app.route("/")
 def home():
-    return "API de rastreamento Sermente V47 (SuperFrete Integrada) 🚚"
+    return "API de rastreamento Sermente V48 (SPX Priority + SuperFrete) 🚚"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
