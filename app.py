@@ -90,6 +90,71 @@ def formatar_data_br(data_str):
     except:
         return data_str
 
+def get_superfrete_tracking(tracking_code):
+    """
+    Extrai dados de rastreamento do SuperFrete (V48).
+    Funciona bem para códigos JNS, Loggi e Correios.
+    """
+    tracking_code = str(tracking_code).strip().upper()
+    url = f"https://rastreamento.superfrete.com/public/tracking/{tracking_code}?application_id=100"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Referer": f"https://rastreamento.superfrete.com/{tracking_code}",
+        "Origin": "https://rastreamento.superfrete.com"
+    }
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            
+            # 1. Tenta pegar os dados do provider_tracking (Loggi/Jadlog via SuperFrete)
+            p_track = data.get("provider_tracking", {})
+            if p_track and p_track.get("success"):
+                tracking_info = p_track.get("tracking", {})
+                status_atual = tracking_info.get("status", "Em trânsito")
+                eventos_raw = tracking_info.get("eventos", [])
+                
+                eventos = []
+                for ev in eventos_raw:
+                    data_iso = ev.get("data", "")
+                    try:
+                        dt = datetime.strptime(data_iso, "%Y-%m-%d %H:%M:%S")
+                        data_br = dt.strftime("%d/%m/%Y %H:%M")
+                    except:
+                        data_br = data_iso
+                    
+                    desc = ev.get("status")
+                    detalhe = ev.get("descricao")
+                    unidade = ev.get("unidade")
+                    
+                    msg = desc
+                    if detalhe and detalhe != desc:
+                        msg = f"{desc} - {detalhe}"
+                    if unidade:
+                        msg += f" ({unidade})"
+                    eventos.append({"data": data_br, "descricao": msg})
+                
+                if eventos:
+                    return {"status": status_atual, "eventos": eventos}
+            
+            # 2. Tenta pegar os dados do tracking principal (Correios via SuperFrete)
+            main_track = data.get("tracking", {})
+            if main_track and main_track.get("eventos"):
+                eventos_raw = main_track.get("eventos", [])
+                eventos = []
+                for ev in eventos_raw:
+                    data_br = f"{ev.get('data')} {ev.get('hora')}"
+                    desc = ev.get("status")
+                    local = f"{ev.get('local', '')} - {ev.get('cidade', '')}/{ev.get('uf', '')}"
+                    eventos.append({"data": data_br, "descricao": f"{desc} ({local.strip(' - /')})"})
+                
+                if eventos:
+                    return {"status": eventos[0]["descricao"], "eventos": eventos}
+                    
+    except: pass
+    return None
+
 def get_spx_tracking(tracking_number):
     url = "https://spx.com.br/shipment/order/open/order/get_order_info"
     params = {"spx_tn": tracking_number, "language_code": "pt"}
@@ -185,32 +250,21 @@ def get_cainiao_tracking_v2(tracking_number):
 def logic_unificada(codigo):
     codigo = str(codigo).strip().upper()
     
-    # --- DETECÇÃO LOGGI (Solução Híbrida) ---
-    # Padrões Loggi: NE...LG, MR... ou códigos terminando em LG
-    if codigo.startswith("NE") or codigo.startswith("MR") or codigo.endswith("LG"):
-        return {
-            "status": "CÓDIGO DA LOGGI IDENTIFICADO",
-            "loggi_redirect": True,
-            "loggi_url": f"https://www.loggi.com/rastreador/{codigo}",
-            "eventos": [
-                {
-                    "data": datetime.now().strftime("%d/%m/%Y %H:%M"),
-                    "descricao": "POR FAVOR, CONSULTE CLICANDO NO BOTÃO ABAIXO"
-                }
-            ],
-            "codigo_original": codigo
-        }
-
-    # 1. SPX (Prioridade Máxima)
+    # 1. SPX (Prioridade Máxima - Deve vir antes de tudo)
+    # Códigos SPX costumam ter padrões específicos, mas como o usuário quer manter intacto, chamamos primeiro.
     res_spx = get_spx_tracking(codigo)
     if res_spx: return res_spx
+
+    # 2. SuperFrete (Fallback para JNS, Loggi, Jadlog e Correios se SPX falhar)
+    res_sf = get_superfrete_tracking(codigo)
+    if res_sf: return res_sf
     
-    # 2. Correios Direto
+    # 3. Correios Direto (Fallback secundário)
     if (codigo.endswith("BR") and len(codigo) == 13) or re.match(r'^[A-Z]{2}[0-9]{9}BR$', codigo):
         res_br = get_correios_tracking(codigo)
         if res_br: return res_br
     
-    # 3. Cainiao (Internacional)
+    # 4. Cainiao (Internacional)
     res_cainiao = get_cainiao_tracking_v2(codigo)
     if res_cainiao:
         novo_codigo = res_cainiao.get("novo_codigo")
@@ -240,6 +294,21 @@ def logic_unificada(codigo):
 
         return {"status": status_final, "eventos": final, "codigo_original": codigo, "novo_codigo": novo_codigo}
 
+    # 5. Fallback Final (Caso seja Loggi mas não tenha batido no SuperFrete)
+    if codigo.startswith("NE") or codigo.startswith("MR") or codigo.endswith("LG"):
+        return {
+            "status": "CÓDIGO DA LOGGI IDENTIFICADO",
+            "loggi_redirect": True,
+            "loggi_url": f"https://www.loggi.com/rastreador/{codigo}",
+            "eventos": [
+                {
+                    "data": datetime.now().strftime("%d/%m/%Y %H:%M"),
+                    "descricao": "CONSULTE CLICANDO NO BOTÃO ABAIXO (OU SUPERFRETE)"
+                }
+            ],
+            "codigo_original": codigo
+        }
+
     return {
         "status": "Aguardando atualização",
         "eventos": [{"data": datetime.now().strftime("%d/%m/%Y %H:%M"), "descricao": "A transportadora ainda está processando as informações."}],
@@ -256,7 +325,7 @@ def rastrear_global(codigo):
 
 @app.route("/")
 def home():
-    return "API de rastreamento Sermente V46 (Loggi Hybrid) 🚚"
+    return "API de rastreamento Sermente V48 (SPX Priority + SuperFrete) 🚚"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
